@@ -102,6 +102,14 @@ class PhaseZeroContractTest(unittest.TestCase):
         for target in ("build", "lock", "smoke", "lint", "test"):
             self.assertRegex(makefile, rf"(?m)^{target}:")
 
+    def test_ci_uses_node24_checkout_with_least_privilege(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("permissions:\n  contents: read", workflow)
+        self.assertIn("uses: actions/checkout@v6", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertNotIn("uses: actions/checkout@v4", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
