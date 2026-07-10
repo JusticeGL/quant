@@ -1,0 +1,50 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python and tooling caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Editors and macOS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Research data, caches, model artifacts, and local databases
+data/
+artifacts/
+mlruns/
+*.parquet
+*.feather
+*.arrow
+*.duckdb
+*.db
+*.pkl
+*.joblib
+*.onnx
+*.bin
+
+# Experiment payloads are ignored; selected small audit summaries may be tracked.
+experiments/**/*
+!experiments/**/
+!experiments/**/run_manifest.json
+!experiments/**/hypothesis.json
+!experiments/**/factor_result.json
+!experiments/**/decision.json
+!experiments/**/final_report.md
+
+# Notebook and generated report output
+**/.ipynb_checkpoints/
+reports/generated/

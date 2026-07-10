@@ -1,0 +1,26 @@
+name: a-share-alpha-lab
+
+services:
+  locker:
+    build:
+      context: .
+      target: locker
+    image: a-share-alpha-lab-locker:phase0
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+
+  research:
+    build:
+      context: .
+      target: research
+    image: a-share-alpha-lab:phase0
+    init: true
+    working_dir: /workspace
+    environment:
+      PYTHONPATH: /workspace/src
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+    volumes:
+      - .:/workspace
+    stdin_open: true
+    tty: true

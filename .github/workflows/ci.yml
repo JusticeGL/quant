@@ -1,0 +1,20 @@
+name: phase-0
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build locked Linux image
+        run: make build
+      - name: Lint
+        run: make lint
+      - name: Test
+        run: make test
+      - name: Smoke imports
+        run: make smoke
