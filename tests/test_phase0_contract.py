@@ -73,6 +73,29 @@ class PhaseZeroContractTest(unittest.TestCase):
 
         self.assertIn("**/.DS_Store", dockerignore.splitlines())
 
+    def test_dockerfile_caches_dependencies_before_copying_source(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        dependency_sync = "uv sync --frozen --all-groups --no-install-project"
+
+        dependency_sync_position = dockerfile.index(dependency_sync)
+        source_copy_position = dockerfile.index("COPY src ./src")
+        project_sync_position = dockerfile.index(
+            "uv sync --frozen --all-groups", source_copy_position
+        )
+
+        self.assertLess(dependency_sync_position, source_copy_position)
+        self.assertLess(source_copy_position, project_sync_position)
+
+    def test_dockerfile_caches_dependencies_before_copying_readme(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+        dependency_sync_position = dockerfile.index(
+            "uv sync --frozen --all-groups --no-install-project"
+        )
+        readme_copy_position = dockerfile.index("COPY README.md ./")
+
+        self.assertLess(dependency_sync_position, readme_copy_position)
+
     def test_makefile_exposes_phase_zero_targets(self) -> None:
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
 

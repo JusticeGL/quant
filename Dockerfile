@@ -29,7 +29,12 @@ CMD ["uv", "lock"]
 
 FROM base AS research
 
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock ./
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --all-groups --no-install-project
+
+COPY README.md ./
 COPY src ./src
 
 RUN --mount=type=cache,target=/root/.cache/uv \
