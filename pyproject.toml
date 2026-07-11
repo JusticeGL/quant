@@ -25,6 +25,7 @@ dependencies = [
     "pyqlib @ git+https://github.com/microsoft/qlib.git@da920b7f954f48ab1bb64117c976710de198373e",
     "pyyaml",
     "rich",
+    "requests",
     "scikit-learn",
     "scipy",
     "seaborn",

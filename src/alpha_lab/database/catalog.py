@@ -14,12 +14,16 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
+import pandas as pd
 
 from alpha_lab.data.config import load_phase1_config
 from alpha_lab.data.normalize import to_qlib_instrument
 
-SCHEMA_VERSION = 1
-MIGRATION_NAME = "initial_catalog"
+SCHEMA_VERSION = 2
+MIGRATIONS = (
+    (1, "initial_catalog", "001_initial.sql"),
+    (2, "research_data", "002_research_data.sql"),
+)
 
 EXPECTED_TABLES = {
     "meta.schema_migration",
@@ -31,10 +35,12 @@ EXPECTED_TABLES = {
     "meta.quality_result",
     "meta.dataset_contract",
     "meta.repository_state",
+    "meta.provider_capability",
     "ref.exchange",
     "ref.security",
     "ref.security_identifier_history",
     "ref.security_lifecycle",
+    "ref.security_name_history",
     "ref.trading_calendar",
     "ref.industry_classification",
     "ref.industry_node",
@@ -59,6 +65,64 @@ EXPECTED_TABLES = {
 }
 
 DATASET_CONTRACTS: tuple[dict[str, Any], ...] = (
+    {
+        "dataset_name": "ref.security_master",
+        "storage_layer": "research",
+        "primary_key_columns": ["security_id"],
+        "partition_columns": [],
+        "required_columns": [
+            "security_id",
+            "ts_code",
+            "exchange",
+            "list_status",
+            "list_date",
+            "delist_date",
+            "known_at",
+        ],
+        "point_in_time_column": "known_at",
+        "description": "Point-in-time A-share security master with delisted rows.",
+    },
+    {
+        "dataset_name": "ref.security_name_history",
+        "storage_layer": "research",
+        "primary_key_columns": ["security_id", "effective_from"],
+        "partition_columns": [],
+        "required_columns": [
+            "security_id",
+            "name",
+            "is_st",
+            "effective_from",
+            "effective_to",
+            "known_at",
+        ],
+        "point_in_time_column": "known_at",
+        "description": "Historical security names and ST intervals.",
+    },
+    {
+        "dataset_name": "ref.index_membership",
+        "storage_layer": "research",
+        "primary_key_columns": ["index_id", "security_id", "effective_from"],
+        "partition_columns": [],
+        "required_columns": [
+            "index_id",
+            "security_id",
+            "effective_from",
+            "effective_to",
+            "known_at",
+            "membership_method",
+        ],
+        "point_in_time_column": "known_at",
+        "description": "Point-in-time dynamic index membership intervals.",
+    },
+    {
+        "dataset_name": "research.universe_dates",
+        "storage_layer": "research",
+        "primary_key_columns": ["as_of_date", "index_id", "security_id"],
+        "partition_columns": [],
+        "required_columns": ["as_of_date", "index_id", "security_id"],
+        "point_in_time_column": "as_of_date",
+        "description": "Materialized historically knowable universe membership.",
+    },
     {
         "dataset_name": "market.daily_bar",
         "storage_layer": "silver",
@@ -212,15 +276,14 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _migration_sql() -> str:
-    resource = resources.files("alpha_lab.database.sql").joinpath("001_initial.sql")
+def _migration_sql(filename: str) -> str:
+    resource = resources.files("alpha_lab.database.sql").joinpath(filename)
     return resource.read_text(encoding="utf-8")
 
 
 def initialize_database(database_path: Path) -> InitializationResult:
     database_path.parent.mkdir(parents=True, exist_ok=True)
-    sql = _migration_sql()
-    migration_sha256 = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+    latest_sha256 = ""
 
     with duckdb.connect(str(database_path)) as connection:
         connection.execute("CREATE SCHEMA IF NOT EXISTS meta")
@@ -234,26 +297,38 @@ def initialize_database(database_path: Path) -> InitializationResult:
             )
             """
         )
-        existing = connection.execute(
-            "SELECT sha256 FROM meta.schema_migration WHERE version = ?",
-            [SCHEMA_VERSION],
-        ).fetchone()
-        if existing is not None and str(existing[0]) != migration_sha256:
-            raise RuntimeError(
-                "applied database migration hash differs from packaged migration"
-            )
-
-        connection.execute("BEGIN TRANSACTION")
-        try:
-            if existing is None:
+        for version, name, filename in MIGRATIONS:
+            sql = _migration_sql(filename)
+            migration_sha256 = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+            latest_sha256 = migration_sha256
+            existing = connection.execute(
+                "SELECT name, sha256 FROM meta.schema_migration WHERE version = ?",
+                [version],
+            ).fetchone()
+            if existing is not None:
+                if str(existing[0]) != name or str(existing[1]) != migration_sha256:
+                    raise RuntimeError(
+                        "applied database migration hash differs from packaged "
+                        f"migration {version}"
+                    )
+                continue
+            connection.execute("BEGIN TRANSACTION")
+            try:
                 connection.execute(sql)
                 connection.execute(
                     """
                     INSERT INTO meta.schema_migration (version, name, sha256)
                     VALUES (?, ?, ?)
                     """,
-                    [SCHEMA_VERSION, MIGRATION_NAME, migration_sha256],
+                    [version, name, migration_sha256],
                 )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+        connection.execute("BEGIN TRANSACTION")
+        try:
             _seed_catalog(connection)
             connection.execute("COMMIT")
         except Exception:
@@ -263,7 +338,7 @@ def initialize_database(database_path: Path) -> InitializationResult:
     return InitializationResult(
         database_path=database_path,
         schema_version=SCHEMA_VERSION,
-        migration_sha256=migration_sha256,
+        migration_sha256=latest_sha256,
     )
 
 
@@ -286,6 +361,15 @@ def _seed_catalog(connection: duckdb.DuckDBPyConnection) -> None:
             importlib.metadata.version("baostock"),
             "Public fallback data source; verify source terms before redistribution.",
             20,
+        ),
+        (
+            "tushare",
+            "tushare",
+            "rest_api",
+            "tushare",
+            importlib.metadata.version("tushare"),
+            "Optional authenticated research data source; redistribution terms apply.",
+            5,
         ),
     )
     connection.executemany(
@@ -407,9 +491,14 @@ def sync_repository_metadata(
                 (data_root / "manifests").glob("*/manifest.json")
             ):
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                snapshot_artifacts, quality_count = _sync_manifest(
-                    connection, data_root, manifest
-                )
+                if manifest.get("snapshot_type") == "research_market":
+                    snapshot_artifacts, quality_count = _sync_research_manifest(
+                        connection, data_root, manifest
+                    )
+                else:
+                    snapshot_artifacts, quality_count = _sync_manifest(
+                        connection, data_root, manifest
+                    )
                 artifact_ids.update(snapshot_artifacts)
                 quality_results_synced += quality_count
                 snapshots_synced += 1
@@ -426,6 +515,18 @@ def sync_repository_metadata(
                     """,
                     [latest_path.read_text(encoding="utf-8").strip()],
                 )
+            latest_research = data_root / "state" / "latest_research_snapshot.txt"
+            if latest_research.is_file():
+                connection.execute(
+                    """
+                    INSERT INTO meta.repository_state (key, value)
+                    VALUES ('latest_research_snapshot_id', ?)
+                    ON CONFLICT (key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    [latest_research.read_text(encoding="utf-8").strip()],
+                )
             connection.execute("COMMIT")
         except Exception:
             connection.execute("ROLLBACK")
@@ -437,6 +538,356 @@ def sync_repository_metadata(
         artifacts_synced=len(artifact_ids),
         quality_results_synced=quality_results_synced,
     )
+
+
+def sync_research_snapshot(
+    database_path: Path, data_root: Path, manifest_path: Path
+) -> None:
+    """Synchronize one immutable Phase 5 snapshot into the DuckDB catalog."""
+    with _catalog_write_lock(database_path):
+        initialize_database(database_path)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("snapshot_type") != "research_market":
+            raise ValueError("manifest is not a Phase 5 research snapshot")
+        with duckdb.connect(str(database_path)) as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                _sync_research_manifest(connection, data_root, manifest)
+                connection.execute(
+                    """
+                    INSERT INTO meta.repository_state (key, value)
+                    VALUES ('latest_research_snapshot_id', ?)
+                    ON CONFLICT (key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    [manifest["snapshot_id"]],
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+
+def _sync_research_manifest(
+    connection: duckdb.DuckDBPyConnection,
+    data_root: Path,
+    manifest: dict[str, Any],
+) -> tuple[set[str], int]:
+    snapshot_id = str(manifest["snapshot_id"])
+    summary = manifest["summary"]
+    scope = manifest["scope"]
+    quality_status = str(manifest["quality_status"])
+    snapshot_status = "invalid" if quality_status == "error" else "valid"
+    connection.execute(
+        """
+        INSERT INTO meta.dataset_snapshot
+            (snapshot_id, snapshot_type, status, identity_sha256,
+             schema_version, config_sha256, source_config, universe_config,
+             row_count, security_count, start_date, end_date, quality_status)
+        VALUES (?, 'research_market', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (snapshot_id) DO NOTHING
+        """,
+        [
+            snapshot_id,
+            snapshot_status,
+            manifest["identity_sha256"],
+            int(manifest["schema_version"]),
+            manifest["identity_sha256"],
+            _canonical_json(manifest["source"]),
+            _canonical_json(scope),
+            int(summary.get("daily_bar_count", 0)),
+            int(summary["security_count"]),
+            scope["start_date"],
+            scope["end_date"],
+            quality_status,
+        ],
+    )
+
+    artifact_ids: set[str] = set()
+    artifact_by_name: dict[str, str] = {}
+    for artifact in manifest.get("artifacts", []):
+        name = str(artifact["name"])
+        dataset_name = _research_dataset_name(name)
+        artifact_id = _upsert_artifact(
+            connection,
+            data_root,
+            layer="research",
+            dataset_name=dataset_name,
+            relative_path=str(artifact["path"]),
+            artifact_format=str(artifact.get("format", "parquet")),
+            sha256=str(artifact["sha256"]),
+            schema_version=int(manifest["schema_version"]),
+            source_id="tushare",
+            row_count=int(artifact["row_count"]),
+            min_event_date=scope["start_date"],
+            max_event_date=scope["end_date"],
+        )
+        _link_artifact(connection, snapshot_id, artifact_id, dataset_name)
+        artifact_ids.add(artifact_id)
+        artifact_by_name[name] = artifact_id
+
+    for raw_input in manifest.get("raw_inputs", []):
+        artifact_id = _upsert_artifact(
+            connection,
+            data_root,
+            layer="raw",
+            dataset_name=f"tushare.{raw_input['api_name']}",
+            relative_path=str(raw_input["path"]),
+            artifact_format="parquet",
+            sha256=str(raw_input["sha256"]),
+            schema_version=int(manifest["schema_version"]),
+            source_id="tushare",
+            row_count=int(raw_input["row_count"]),
+            min_event_date=scope["start_date"],
+            max_event_date=scope["end_date"],
+        )
+        _link_artifact(
+            connection, snapshot_id, artifact_id, f"tushare.{raw_input['api_name']}"
+        )
+        artifact_ids.add(artifact_id)
+
+    security_path = _research_artifact_path(
+        data_root, manifest, "security_master.parquet"
+    )
+    name_path = _research_artifact_path(
+        data_root, manifest, "security_name_history.parquet"
+    )
+    membership_path = _research_artifact_path(
+        data_root, manifest, "index_membership.parquet"
+    )
+    security = pd.read_parquet(security_path)
+    names = pd.read_parquet(name_path)
+    membership = pd.read_parquet(membership_path)
+    security_artifact = artifact_by_name.get("security_master.parquet")
+    name_artifact = artifact_by_name.get("security_name_history.parquet")
+    membership_artifact = artifact_by_name.get("index_membership.parquet")
+    _sync_research_securities(connection, security, security_artifact)
+    _sync_security_names(connection, names, name_artifact)
+    _sync_index_membership(connection, membership, membership_artifact)
+    quality_count = _sync_research_quality(connection, data_root, snapshot_id, manifest)
+    return artifact_ids, quality_count
+
+
+def _sync_research_securities(
+    connection: duckdb.DuckDBPyConnection,
+    frame: pd.DataFrame,
+    source_artifact_id: str | None,
+) -> None:
+    listing_status = {
+        "L": "listed",
+        "D": "delisted",
+        "P": "suspended_listing",
+        "G": "prelisted",
+    }
+    for row in frame.to_dict("records"):
+        security_id = str(row["security_id"])
+        connection.execute(
+            """
+            INSERT INTO ref.security
+                (security_id, asset_type, exchange, board, currency, lot_size)
+            VALUES (?, 'stock', ?, ?, ?, 100)
+            ON CONFLICT (security_id) DO NOTHING
+            """,
+            [
+                security_id,
+                row["exchange"],
+                row.get("board"),
+                row.get("currency") or "CNY",
+            ],
+        )
+        known_at = row.get("known_at") or pd.Timestamp.now(tz="UTC")
+        for identifier_type, identifier_value in (
+            ("tushare_code", row.get("ts_code")),
+            ("symbol", row.get("symbol")),
+            ("name", row.get("name")),
+        ):
+            if identifier_value is None:
+                continue
+            identifier_id = hashlib.sha256(
+                f"{security_id}|{identifier_type}|{identifier_value}|{row['list_date']}".encode()
+            ).hexdigest()
+            connection.execute(
+                """
+                INSERT INTO ref.security_identifier_history
+                    (identifier_id, security_id, identifier_type, identifier_value,
+                     valid_from, known_at, source_artifact_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (identifier_id) DO NOTHING
+                """,
+                [
+                    identifier_id,
+                    security_id,
+                    identifier_type,
+                    str(identifier_value),
+                    row["list_date"],
+                    known_at,
+                    source_artifact_id,
+                ],
+            )
+        connection.execute(
+            """
+            INSERT INTO ref.security_lifecycle
+                (security_id, list_date, delist_date, listing_status,
+                 known_at, source_artifact_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (security_id) DO UPDATE SET
+                list_date = excluded.list_date,
+                delist_date = excluded.delist_date,
+                listing_status = excluded.listing_status,
+                known_at = excluded.known_at,
+                source_artifact_id = excluded.source_artifact_id
+            """,
+            [
+                security_id,
+                row["list_date"],
+                row.get("delist_date"),
+                listing_status.get(str(row.get("list_status")), "unknown"),
+                known_at,
+                source_artifact_id,
+            ],
+        )
+
+
+def _sync_security_names(
+    connection: duckdb.DuckDBPyConnection,
+    frame: pd.DataFrame,
+    source_artifact_id: str | None,
+) -> None:
+    for row in frame.to_dict("records"):
+        name_id = hashlib.sha256(
+            f"{row['security_id']}|{row['effective_from']}|{row['name']}".encode()
+        ).hexdigest()
+        connection.execute(
+            """
+            INSERT INTO ref.security_name_history
+                (name_history_id, security_id, security_name, is_st,
+                 effective_from, effective_to, announced_at, known_at,
+                 source_artifact_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (name_history_id) DO NOTHING
+            """,
+            [
+                name_id,
+                row["security_id"],
+                row["name"],
+                row.get("is_st"),
+                row["effective_from"],
+                row.get("effective_to"),
+                row.get("announced_at"),
+                row["known_at"],
+                source_artifact_id,
+            ],
+        )
+
+
+def _sync_index_membership(
+    connection: duckdb.DuckDBPyConnection,
+    frame: pd.DataFrame,
+    source_artifact_id: str | None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO ref.index_definition
+            (index_id, index_code, index_name, exchange, provider)
+        VALUES ('CN:INDEX:000300.SH', '000300.SH', '沪深300', 'SSE', 'tushare')
+        ON CONFLICT (index_id) DO NOTHING
+        """
+    )
+    for row in frame.to_dict("records"):
+        membership_id = hashlib.sha256(
+            f"{row['index_id']}|{row['security_id']}|{row['effective_from']}".encode()
+        ).hexdigest()
+        connection.execute(
+            """
+            INSERT INTO ref.index_membership_history
+                (membership_id, index_id, security_id, effective_from,
+                 effective_to, announced_at, known_at, weight,
+                 membership_method, source_artifact_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (membership_id) DO NOTHING
+            """,
+            [
+                membership_id,
+                row["index_id"],
+                row["security_id"],
+                row["effective_from"],
+                row.get("effective_to"),
+                row.get("announced_at"),
+                row.get("known_at"),
+                row.get("weight"),
+                row.get("membership_method"),
+                source_artifact_id,
+            ],
+        )
+
+
+def _sync_research_quality(
+    connection: duckdb.DuckDBPyConnection,
+    data_root: Path,
+    snapshot_id: str,
+    manifest: dict[str, Any],
+) -> int:
+    quality = manifest.get("quality_report")
+    if not quality:
+        return 0
+    path = data_root / str(quality["path"])
+    if not path.is_file():
+        return 0
+    report = json.loads(path.read_text(encoding="utf-8"))
+    for name, check in report.get("checks", {}).items():
+        count = int(check["count"])
+        connection.execute(
+            """
+            INSERT INTO meta.quality_result
+                (snapshot_id, dataset_name, check_name, severity, status,
+                 observed_value, threshold_value, affected_rows, details)
+            VALUES (?, 'research.point_in_time', ?, ?, ?, ?, 0, ?, ?)
+            ON CONFLICT (snapshot_id, dataset_name, check_name) DO UPDATE SET
+                severity = excluded.severity,
+                status = excluded.status,
+                observed_value = excluded.observed_value,
+                affected_rows = excluded.affected_rows,
+                details = excluded.details
+            """,
+            [
+                snapshot_id,
+                name,
+                check["severity"],
+                check["status"],
+                count,
+                count,
+                _canonical_json(check),
+            ],
+        )
+    return len(report.get("checks", {}))
+
+
+def _research_artifact_path(
+    data_root: Path, manifest: dict[str, Any], name: str
+) -> Path:
+    for artifact in manifest.get("artifacts", []):
+        if artifact.get("name") == name:
+            path = data_root / str(artifact["path"])
+            if not path.is_file():
+                raise ValueError(f"research snapshot artifact is missing: {path}")
+            return path
+    raise ValueError(f"research snapshot manifest is missing artifact: {name}")
+
+
+def _research_dataset_name(name: str) -> str:
+    prefix = name.split("/", maxsplit=1)[0].removesuffix(".parquet")
+    return {
+        "security_master": "ref.security_master",
+        "security_name_history": "ref.security_name_history",
+        "trading_calendar": "ref.trading_calendar",
+        "index_membership": "ref.index_membership",
+        "suspension": "market.suspension",
+        "universe_dates": "research.universe_dates",
+        "daily_bar": "market.daily_bar",
+        "adjustment_factor": "market.adjustment_factor",
+        "daily_status": "market.daily_status",
+    }.get(prefix, f"research.{prefix}")
 
 
 def _sync_security(

@@ -14,13 +14,28 @@ services:
     build:
       context: .
       target: research
+    image: a-share-alpha-lab:phase5
+    init: true
+    working_dir: /workspace
+    environment:
+      PYTHONPATH: /workspace/src
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+      TUSHARE_HTTP_URL: ${TUSHARE_HTTP_URL:-https://api.tushare.pro}
+    volumes:
+      - .:/workspace
+    stdin_open: true
+    tty: true
+
+  data:
+    build:
+      context: .
+      target: research
     image: a-share-alpha-lab:phase3
     init: true
     working_dir: /workspace
     environment:
       PYTHONPATH: /workspace/src
       TUSHARE_TOKEN: ${TUSHARE_TOKEN:-}
+      TUSHARE_HTTP_URL: ${TUSHARE_HTTP_URL:-https://api.tushare.pro}
     volumes:
       - .:/workspace
-    stdin_open: true
-    tty: true

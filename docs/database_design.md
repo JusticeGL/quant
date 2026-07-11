@@ -21,7 +21,8 @@ It is never the source of truth.
 | `policy` | Versioned price-limit, cost and other locked research policies |
 | `research` | Universes, factor versions, experiment metrics, decisions and backtest catalogs |
 
-The initial migration creates 34 base tables, eight external dataset contracts,
+The initial migration creates 34 base tables. Phase 5 adds a second immutable
+migration for provider capabilities and security-name history, and expands external dataset contracts,
 three exchange records, two data-source records, and typed table macros for
 reading Parquet facts.
 
@@ -69,6 +70,12 @@ backtests, and fails if an orphan is present.
 Versioned SQL files live under `src/alpha_lab/database/sql/`. An applied
 migration is recorded with its SHA256 in `meta.schema_migration`. Applied files
 must never be edited: schema changes require a new numbered migration.
+
+Phase 5 uses `002_research_data.sql`; `001_initial.sql` retains its recorded SHA256.
+Dynamic membership reuses `ref.index_membership_history` with `known_at` and
+`membership_method`. Large daily bars, adjustment factors, status facts, and materialized
+universe dates remain external Parquet and are linked through `meta.artifact` and
+`meta.snapshot_artifact`.
 
 Initialization is idempotent. A packaged migration whose SHA256 differs from an
 already applied version is rejected.

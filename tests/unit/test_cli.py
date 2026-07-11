@@ -23,5 +23,10 @@ def test_cli_registers_data_database_and_baseline_commands() -> None:
         "mining-round",
         "mining-loop",
         "mining-report",
+        "research-data-probe",
+        "research-data-bootstrap",
+        "research-data-update",
+        "research-data-validate",
+        "universe-asof",
     ):
         assert command in result.output

@@ -1,0 +1,24 @@
+schema_version: 1
+dataset_id: csi300_point_in_time
+index_code: 000300.SH
+start_date: 2020-01-01
+end_date: 2026-07-11
+membership_method: interval_or_weight_observation
+stock_statuses: [L, D, P, G]
+calendar_exchange: SSE
+maximum_symbols: 1000
+source:
+  provider: tushare
+  request_timeout_seconds: 30
+  max_attempts: 3
+  retry_delay_seconds: 2
+  request_interval_seconds: 0.2
+endpoints:
+  security_master: stock_basic
+  trading_calendar: trade_cal
+  membership_primary: index_member_all
+  membership_fallback: index_weight
+  daily_bar: daily
+  adjustment_factor: adj_factor
+  suspension: suspend_d
+  name_history: namechange

@@ -1,13 +1,14 @@
 # A-Share Alpha Lab
 
-这是 A 股自动因子研究平台的 Phase 4 可审计因子挖掘环境。项目在 Linux Python 3.11 容器中
+这是 A 股自动因子研究平台的 Phase 5 研究级数据环境。项目在 Linux Python 3.11 容器中
 完成 Phase 1 的不可变数据闭环，并使用 Qlib Alpha158、确定性 LightGBM、validation
 信号分析和 Top-K 组合回测生成 Phase 2 基线；Phase 3 增加严格因子契约、注册表、固定
 评价程序和防泄漏门禁；Phase 4 在其上增加单点假设、候选生成、固定评价、结构化决策和
 可恢复多轮日志。规格书列出的 Baostock 只在 AKShare 失败时作为显式备用源。
 
-当前不包含研究级历史动态股票池、锁定测试集评价或交易账户连接；这些属于后续阶段。
-Phase 4 的 `ACCEPT` 只表示进入人工复核，不会自动修改已接受因子注册表。
+Phase 5 增加 2020 年起沪深 300 动态成分、退市、历史名称/ST、停牌和独立复权因子。
+当前仍不包含锁定测试集评价或交易账户连接。Phase 4 的 `ACCEPT` 只表示进入人工复核，
+不会自动修改已接受因子注册表。
 
 ## 研究边界
 
@@ -159,6 +160,24 @@ ACCEPT/REJECT 由固定 promotion checks 约束，且始终标记
 建议会登记到 DuckDB 的 `research.experiment_*` 表。完整协议见
 [Phase 4 因子挖掘说明](docs/phase4_factor_mining.md)。
 
+## Phase 5 研究级数据
+
+Phase 5 使用独立 `data` Compose 服务，范围固定为 `000300.SH`、`2020-01-01` 至配置结束日。
+凭据仅从本地 `.env` 注入：
+
+```bash
+make research-data-probe
+make research-data-bootstrap
+make research-data-validate SNAPSHOT=p5-<snapshot-id>
+make universe-asof DATE=2021-06-01 SNAPSHOT=p5-<snapshot-id>
+make research-data-update END_DATE=2026-12-31
+```
+
+原始 Tushare 响应保持不可变 Parquet 与脱敏 sidecar。研究快照将未复权日线、复权因子、
+历史名称/ST、停牌事件、证券生命周期和动态指数成分分开保存。历史股票池同时检查生效区间、
+公告/已知日期和上市/退市日期，不能把当前名称或当前成分回填到过去。完整说明见
+[Phase 5 研究数据说明](docs/phase5_research_data.md)。
+
 也可以显式选择快照：
 
 ```bash
@@ -205,8 +224,8 @@ raw Parquet 保存数据源原始列；同目录 JSON 保存 provider、endpoint
 快照 ID 只由标准化 schema 版本、数据源配置、样本配置和 raw SHA256 决定，不包含运行
 时间或主机绝对路径。同一快照的 manifest 和 Qlib 内容哈希因此可以重复验证。
 
-当前 bronze 与 silver 使用相同的 Phase 1 标准表。silver 尚未补齐复权和时点状态，不能
-视为研究级数据。详细字段见 [Phase 1 数据字典](docs/data_dictionary.md)。
+Phase 1 bronze/silver 仍是工程样本，不会被 Phase 5 覆盖。研究级时点表位于独立的
+`data/research/p5-*` 快照。详细字段见 [数据字典](docs/data_dictionary.md)。
 
 ## DuckDB 数据目录
 
@@ -215,8 +234,9 @@ raw Parquet 保存数据源原始列；同目录 JSON 保存 provider、endpoint
 财务、因子和回测明细继续使用 Parquet。DuckDB 通过类型化 table macro 直接读取固定
 Parquet 文件。
 
-初始 schema 包含 `meta/ref/market/fundamental/policy/research` 六个域、34 张基础表和
-8 个外部数据集契约。完整设计见 [数据库设计](docs/database_design.md)。数据库文件本身
+数据库包含 `meta/ref/market/fundamental/policy/research` 六个域；Phase 5 使用第二个
+不可变迁移增加提供方能力审计和证券名称历史，并扩充外部数据集契约。完整设计见
+[数据库设计](docs/database_design.md)。数据库文件本身
 属于可再生本地状态，继续由 Git 忽略。
 
 ## 质量门槛
@@ -245,7 +265,7 @@ Parquet 文件。
 ## 已知风险
 
 - AKShare 的 Eastmoney 上游可能限流、主动断连或改变字段；锁文件不能固定外部接口。
-- 免费当前样本无法消除生存者偏差；历史动态股票池、退市股和状态数据属于 Phase 5。
+- Phase 5 只消除 CSI 300 范围内的当前成分回填，不代表全 A 股无生存者偏差。
 - 标准表把 AKShare 的“手”成交量乘以 100 转成股；Baostock 成交量已经是股。成交额保留
   数据源原值。研究使用前仍需做抽样交叉核验。
 - ARM64 依赖失败时先保留错误并诊断。项目不会自动切到 `linux/amd64`。备用端点只有在

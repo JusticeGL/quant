@@ -30,8 +30,8 @@ def test_database_initialization_is_versioned_idempotent_and_constrained(
     first = initialize_database(database_path)
     second = initialize_database(database_path)
 
-    assert first.schema_version == 1
-    assert second.schema_version == 1
+    assert first.schema_version == 2
+    assert second.schema_version == 2
     assert first.migration_sha256 == second.migration_sha256
 
     with duckdb.connect(str(database_path)) as connection:
@@ -53,8 +53,8 @@ def test_database_initialization_is_versioned_idempotent_and_constrained(
         ).fetchone()[0]
 
         assert tables >= EXPECTED_TABLES
-        assert migration_count == 1
-        assert contract_count >= 8
+        assert migration_count == 2
+        assert contract_count >= 12
 
         connection.execute(
             """
@@ -174,7 +174,7 @@ def test_manifest_and_universe_sync_populates_catalog(tmp_path: Path) -> None:
 
     assert first.snapshots_synced == 1
     assert second.snapshots_synced == 1
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["security_count"] == 10
     assert report["snapshot_count"] == 1
     assert report["artifact_count"] == 2

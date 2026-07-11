@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Any
@@ -18,6 +19,7 @@ from alpha_lab.database.catalog import (
     check_database,
     initialize_database,
     sync_repository_metadata,
+    sync_research_snapshot,
 )
 from alpha_lab.evaluation.pipeline import evaluate_factor
 from alpha_lab.factors.registry import FactorRegistry
@@ -27,6 +29,12 @@ from alpha_lab.mining.pipeline import (
     run_mining_loop,
     run_mining_round,
 )
+from alpha_lab.research_data.pipeline import (
+    probe_research_data,
+    run_research_data_pipeline,
+)
+from alpha_lab.research_data.snapshot import validate_research_snapshot
+from alpha_lab.research_data.universe import universe_as_of
 
 app = typer.Typer(
     add_completion=False,
@@ -46,6 +54,18 @@ def _latest_snapshot(data_dir: Path, snapshot: str | None) -> str:
     if not state_path.is_file():
         raise typer.BadParameter(
             "no latest snapshot; run make data-bootstrap first", param_hint="snapshot"
+        )
+    return state_path.read_text(encoding="utf-8").strip()
+
+
+def _latest_research_snapshot(data_dir: Path, snapshot: str | None) -> str:
+    if snapshot:
+        return snapshot
+    state_path = data_dir / "state" / "latest_research_snapshot.txt"
+    if not state_path.is_file():
+        raise typer.BadParameter(
+            "no latest research snapshot; run make research-data-bootstrap first",
+            param_hint="snapshot",
         )
     return state_path.read_text(encoding="utf-8").strip()
 
@@ -148,6 +168,133 @@ def qlib_export(
             "output": str(result.output_path),
             "content_sha256": result.content_sha256,
             "file_count": result.file_count,
+        }
+    )
+
+
+@app.command("research-data-probe")
+def research_data_probe(
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+) -> None:
+    """Probe bounded Tushare Phase 5 capabilities without building a snapshot."""
+    try:
+        report = probe_research_data(config_dir, data_dir)
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        typer.echo(f"research data probe failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _render(asdict(report))
+
+
+def _run_research_ingestion(
+    config_dir: Path, data_dir: Path, end_date: date | None
+) -> None:
+    try:
+        result = run_research_data_pipeline(config_dir, data_dir, end_date=end_date)
+        sync_research_snapshot(
+            data_dir / "metadata.duckdb",
+            data_dir,
+            result.snapshot.manifest_path,
+        )
+    except (duckdb.Error, OSError, RuntimeError, TypeError, ValueError) as error:
+        typer.echo(f"research data ingestion failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _render(
+        {
+            "snapshot_id": result.snapshot.snapshot_id,
+            "quality_status": result.snapshot.quality_status,
+            "historical_symbol_count": result.historical_symbol_count,
+            "membership_method": result.membership_method,
+            "network_requests": result.network_requests,
+            "cache_hits": result.cache_hits,
+            "raw_artifact_count": result.raw_artifact_count,
+            "manifest": str(result.snapshot.manifest_path),
+        }
+    )
+
+
+@app.command("research-data-bootstrap")
+def research_data_bootstrap(
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+) -> None:
+    """Build the bounded CSI 300 point-in-time Phase 5 snapshot."""
+    _run_research_ingestion(config_dir, data_dir, None)
+
+
+@app.command("research-data-update")
+def research_data_update(
+    end_date: Annotated[str, typer.Option("--end-date", metavar="YYYY-MM-DD")],
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+) -> None:
+    """Append missing raw intervals and build a new immutable research snapshot."""
+    try:
+        parsed = date.fromisoformat(end_date)
+    except ValueError as error:
+        raise typer.BadParameter(
+            "end-date must use YYYY-MM-DD", param_hint="end-date"
+        ) from error
+    _run_research_ingestion(config_dir, data_dir, parsed)
+
+
+@app.command("research-data-validate")
+def research_data_validate(
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    snapshot: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Verify manifest identity and every Phase 5 artifact checksum."""
+    snapshot_id = _latest_research_snapshot(data_dir, snapshot)
+    try:
+        report = validate_research_snapshot(data_dir, snapshot_id)
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        typer.echo(f"research data validation failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _render(report)
+    if not report["healthy"]:
+        raise typer.Exit(code=2)
+
+
+@app.command("universe-asof")
+def universe_asof(
+    as_of: Annotated[str, typer.Option("--date", metavar="YYYY-MM-DD")],
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    snapshot: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Return the historically knowable CSI 300 universe for one date."""
+    try:
+        selected_date = date.fromisoformat(as_of)
+    except ValueError as error:
+        raise typer.BadParameter(
+            "date must use YYYY-MM-DD", param_hint="date"
+        ) from error
+    snapshot_id = _latest_research_snapshot(data_dir, snapshot)
+    manifest_path = data_dir / "manifests" / snapshot_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    artifacts = {item["name"]: item for item in manifest["artifacts"]}
+    security = pd.read_parquet(data_dir / artifacts["security_master.parquet"]["path"])
+    membership = pd.read_parquet(
+        data_dir / artifacts["index_membership.parquet"]["path"]
+    )
+    selected = universe_as_of(security, membership, selected_date)
+    members = [
+        {
+            "security_id": str(row.security_id),
+            "ts_code": str(getattr(row, "ts_code", "")),
+            "name": str(getattr(row, "name", "")),
+            "weight": (
+                None if pd.isna(getattr(row, "weight", None)) else float(row.weight)
+            ),
+        }
+        for row in selected.itertuples(index=False)
+    ]
+    _render(
+        {
+            "snapshot_id": snapshot_id,
+            "date": selected_date.isoformat(),
+            "index_id": "CN:INDEX:000300.SH",
+            "member_count": len(members),
+            "members": members,
         }
     )
 

@@ -1,5 +1,6 @@
 COMPOSE := docker compose
 RESEARCH_SERVICE := research
+DATA_SERVICE := data
 LOCK_SERVICE := locker
 CONFIG_DIR ?= config
 DATA_DIR ?= data
@@ -10,7 +11,7 @@ DATA_END_DATE_ARG = $(if $(END_DATE),--end-date $(END_DATE),)
 PROPOSAL_ARG = $(if $(PROPOSAL),--proposal $(PROPOSAL),)
 PROPOSALS_DIR_ARG = $(if $(PROPOSALS_DIR),--proposals-dir $(PROPOSALS_DIR),)
 
-.PHONY: build shell lock smoke lint test data-bootstrap data-update data-validate qlib-export db-init db-check baseline factor-list factor-eval mining-round mining-loop report
+.PHONY: build shell lock smoke lint test data-bootstrap data-update data-validate qlib-export research-data-probe research-data-bootstrap research-data-update research-data-validate universe-asof db-init db-check baseline factor-list factor-eval mining-round mining-loop report
 
 build:
 	$(COMPOSE) build $(RESEARCH_SERVICE)
@@ -32,6 +33,21 @@ data-validate:
 
 qlib-export:
 	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli qlib-export --data-dir $(DATA_DIR) $(if $(SNAPSHOT),--snapshot $(SNAPSHOT),)
+
+research-data-probe:
+	$(COMPOSE) run --rm --build $(DATA_SERVICE) python -m alpha_lab.cli research-data-probe --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR)
+
+research-data-bootstrap:
+	$(COMPOSE) run --rm --build $(DATA_SERVICE) python -m alpha_lab.cli research-data-bootstrap --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR)
+
+research-data-update:
+	$(COMPOSE) run --rm --build $(DATA_SERVICE) python -m alpha_lab.cli research-data-update --end-date $(END_DATE) --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR)
+
+research-data-validate:
+	$(COMPOSE) run --rm --build $(DATA_SERVICE) python -m alpha_lab.cli research-data-validate --data-dir $(DATA_DIR) $(if $(SNAPSHOT),--snapshot $(SNAPSHOT),)
+
+universe-asof:
+	$(COMPOSE) run --rm --build $(DATA_SERVICE) python -m alpha_lab.cli universe-asof --date $(DATE) --data-dir $(DATA_DIR) $(if $(SNAPSHOT),--snapshot $(SNAPSHOT),)
 
 db-init:
 	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli db-init --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR)
