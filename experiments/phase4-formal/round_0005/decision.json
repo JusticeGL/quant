@@ -1,0 +1,22 @@
+{
+  "decision": "REJECT",
+  "eligible_for_review": false,
+  "factor_id": "F1004",
+  "factor_result_sha256": "b53452c079d306c9db220d97dc632cb8ddc9352c05e8dc8f4988959533c87e0c",
+  "failed_checks": [
+    "icir"
+  ],
+  "human_approval_required": true,
+  "passed_checks": [
+    "accepted_correlation",
+    "cost_sign_stability",
+    "coverage",
+    "direction_consistency",
+    "leakage",
+    "rank_ic"
+  ],
+  "rationale": "Fixed promotion checks failed: icir.",
+  "round_number": 5,
+  "run_id": "phase4-formal",
+  "schema_version": 1
+}

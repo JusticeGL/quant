@@ -1,0 +1,14 @@
+factor_id: F1002
+name: lagged_volume_surprise_10d
+hypothesis: Unusually high volume versus its prior ten-day baseline may be followed
+  by short-horizon reversal.
+formula: volume / Mean(Ref(volume, 1), 10) - 1
+inputs:
+- volume
+lookback: 11
+direction: -1
+family: liquidity
+author: codex
+parent_factor_ids: []
+created_at: '2026-07-11T12:02:00+08:00'
+status: candidate

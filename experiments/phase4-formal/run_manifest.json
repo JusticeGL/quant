@@ -1,0 +1,71 @@
+{
+  "completed_rounds": 5,
+  "current_round": null,
+  "data_snapshot_id": "p1-7343f386611c0dcbe690",
+  "decision_counts": {
+    "ACCEPT": 2,
+    "ERROR": 0,
+    "REJECT": 3
+  },
+  "git": {
+    "commit": "de137ff20376f73a947160e18eb05da61e19a435",
+    "dirty": true
+  },
+  "locked_area_hashes": {
+    "config/costs.yaml": "c2e88238dfba9afec854d2ffa9cec2bc2b3cf7e072321f0eaec3f3df2320d60d",
+    "config/factor_evaluation.yaml": "dd5228bcd5465f2c8b2d769900cf16255449bf6f38d17a86ebbb2e2d1033f77c",
+    "config/splits.yaml": "02090f442263d76fedff4a1c76b7e127c76f3bc23358fac34e77fd959f7e2bab",
+    "data/manifests/p1-7343f386611c0dcbe690/manifest.json": "7277bdca4c7cdaa99d2049438416b1b98a14bd3e92e99a63dd1c0b034dbaccbc",
+    "data/manifests/p1-7343f386611c0dcbe690/quality_report.json": "973af98eba42fbecb9b59b9509e43160e657b8a2f4924ee19fb7fe2ba4e4d9d5",
+    "src/alpha_lab/evaluation/__init__.py": "571a3280703d3422814b44145a3125f76c30f324945fe01004788aa77c34a36c",
+    "src/alpha_lab/evaluation/config.py": "0cde4f0d0b08a1d41ebb08a0fea52d05a58a331d60a291f15807eba6a5208bc7",
+    "src/alpha_lab/evaluation/leakage.py": "971041e8d087b1f5a7700fbfc389707fa780c4a9e3356a93f73276c25d259843",
+    "src/alpha_lab/evaluation/metrics.py": "849b495d6a1e9e24f6d7a8ea455fc7716ed065ee2c75cf10072b3832e3868879",
+    "src/alpha_lab/evaluation/pipeline.py": "cfa15e0c583b5ec142fc1c6f34a77e35fbb64a91d9bc2f3c6cc3ea2e0a473e51",
+    "tests/leakage/test_future_factor.py": "3067cd2fff7b8b25cc2394acb503d6ca367c0d978a9d8a439c41096fe4320327"
+  },
+  "mining_config_sha256": "b4d63d9b80e1359c748a6f5c18227045e7b626dc2729512b1a9e80798a23ce23",
+  "mining_policy_id": "phase4_factor_mining_v1",
+  "phase": 4,
+  "requested_rounds": 5,
+  "rounds": [
+    {
+      "decision": "REJECT",
+      "decision_sha256": "6099e4f1d9d5c44956c7d32ac407a1d9d9e187b4c1d673728058c67b17767658",
+      "factor_id": "F1000",
+      "factor_result_sha256": "744b5a6317769badc306ccafac6d74cd590447a47cef03754a717b7787508971",
+      "round_number": 1
+    },
+    {
+      "decision": "REJECT",
+      "decision_sha256": "d3d4f25c3e01fbda75a2f2f8609a17e13f98812469ea180e9a7693e68a1135d5",
+      "factor_id": "F1001",
+      "factor_result_sha256": "5d86005058d60935fe0c039da02ef3955e898a40c18dc842300d082d83a305fd",
+      "round_number": 2
+    },
+    {
+      "decision": "ACCEPT",
+      "decision_sha256": "7b1bfa027247761efbfe44d1602d22f080ec3d0f90aa45e0f8591acf7864bc1d",
+      "factor_id": "F1002",
+      "factor_result_sha256": "26330c66fe23b625b7bcce9f1a8e6eb216abcee121051c545752cc9dafc5076d",
+      "round_number": 3
+    },
+    {
+      "decision": "ACCEPT",
+      "decision_sha256": "b9f65f0a01d898e83509f855493ea450525443fdb5c3f3f1ee37f1203e630340",
+      "factor_id": "F1003",
+      "factor_result_sha256": "b32bc6583cf05a0a9ea2c9fa37e8532bab46141043085fa6805d9575e664c49f",
+      "round_number": 4
+    },
+    {
+      "decision": "REJECT",
+      "decision_sha256": "9d15fb5fd83e93b9eb669da19cb6d7d21c5edf64ec8b31b20d237a744a7b8556",
+      "factor_id": "F1004",
+      "factor_result_sha256": "b53452c079d306c9db220d97dc632cb8ddc9352c05e8dc8f4988959533c87e0c",
+      "round_number": 5
+    }
+  ],
+  "run_id": "phase4-formal",
+  "schema_version": 1,
+  "status": "complete"
+}

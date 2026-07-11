@@ -69,8 +69,8 @@ def initialize_mining_run(
         repo_root / "src" / "alpha_lab" / "factors" / "candidates",
         config_dir / "factor_registry.yaml",
     )
-    run_dir.mkdir(parents=True)
-    (run_dir / "proposals").mkdir()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "proposals").mkdir(exist_ok=True)
     git = _git_identity(repo_root)
     manifest = {
         "schema_version": 1,
@@ -488,7 +488,7 @@ def _locked_area_hashes(
     paths.extend(sorted((repo_root / "src" / "alpha_lab" / "evaluation").glob("*.py")))
     paths.extend(sorted((repo_root / "tests" / "leakage").glob("*.py")))
     return {
-        path.relative_to(repo_root).as_posix(): _sha256(path)
+        path.resolve().relative_to(repo_root.resolve()).as_posix(): _sha256(path)
         for path in paths
         if path.is_file()
     }

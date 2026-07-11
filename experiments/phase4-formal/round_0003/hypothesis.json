@@ -1,0 +1,25 @@
+{
+  "changed_variable": "factor_formula",
+  "created_at": "2026-07-11T12:02:00+08:00",
+  "direction": -1,
+  "expected_effect": "Negative raw validation rank IC if volume shocks subsequently reverse.",
+  "factor_id": "F1002",
+  "falsification_criteria": [
+    "Any locked promotion check fails.",
+    "Leakage invariance does not pass."
+  ],
+  "family": "liquidity",
+  "formula": "volume / Mean(Ref(volume, 1), 10) - 1",
+  "hypothesis": "Unusually high volume versus its prior ten-day baseline may be followed by short-horizon reversal.",
+  "inputs": [
+    "volume"
+  ],
+  "lookback": 11,
+  "parent_factor_ids": [],
+  "primary_change": "new_factor",
+  "rationale": "The baseline excludes the current observation through a positive lag and tests one volume-surprise transformation.",
+  "round_number": 3,
+  "run_id": "phase4-formal",
+  "schema_version": 1,
+  "title": "Lagged volume surprise reversal"
+}

@@ -1,0 +1,22 @@
+{
+  "decision": "REJECT",
+  "eligible_for_review": false,
+  "factor_id": "F1001",
+  "factor_result_sha256": "5d86005058d60935fe0c039da02ef3955e898a40c18dc842300d082d83a305fd",
+  "failed_checks": [
+    "cost_sign_stability"
+  ],
+  "human_approval_required": true,
+  "passed_checks": [
+    "accepted_correlation",
+    "coverage",
+    "direction_consistency",
+    "icir",
+    "leakage",
+    "rank_ic"
+  ],
+  "rationale": "Fixed promotion checks failed: cost_sign_stability.",
+  "round_number": 2,
+  "run_id": "phase4-formal",
+  "schema_version": 1
+}

@@ -1,0 +1,21 @@
+{
+  "decision": "ACCEPT",
+  "eligible_for_review": true,
+  "factor_id": "F1003",
+  "factor_result_sha256": "b32bc6583cf05a0a9ea2c9fa37e8532bab46141043085fa6805d9575e664c49f",
+  "failed_checks": [],
+  "human_approval_required": true,
+  "passed_checks": [
+    "accepted_correlation",
+    "cost_sign_stability",
+    "coverage",
+    "direction_consistency",
+    "icir",
+    "leakage",
+    "rank_ic"
+  ],
+  "rationale": "All fixed promotion checks passed; recommend human review only.",
+  "round_number": 4,
+  "run_id": "phase4-formal",
+  "schema_version": 1
+}

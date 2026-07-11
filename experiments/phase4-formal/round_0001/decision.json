@@ -1,0 +1,22 @@
+{
+  "decision": "REJECT",
+  "eligible_for_review": false,
+  "factor_id": "F1000",
+  "factor_result_sha256": "744b5a6317769badc306ccafac6d74cd590447a47cef03754a717b7787508971",
+  "failed_checks": [
+    "direction_consistency"
+  ],
+  "human_approval_required": true,
+  "passed_checks": [
+    "accepted_correlation",
+    "cost_sign_stability",
+    "coverage",
+    "icir",
+    "leakage",
+    "rank_ic"
+  ],
+  "rationale": "Fixed promotion checks failed: direction_consistency.",
+  "round_number": 1,
+  "run_id": "phase4-formal",
+  "schema_version": 1
+}

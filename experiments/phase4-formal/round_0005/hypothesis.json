@@ -1,0 +1,26 @@
+{
+  "changed_variable": "factor_formula",
+  "created_at": "2026-07-11T12:04:00+08:00",
+  "direction": 1,
+  "expected_effect": "Positive validation rank IC if less amount-intensive momentum persists.",
+  "factor_id": "F1004",
+  "falsification_criteria": [
+    "Any locked promotion check fails.",
+    "Leakage invariance does not pass."
+  ],
+  "family": "price_liquidity",
+  "formula": "(close / Ref(close, 10) - 1) / Log(1 + Mean(amount, 10))",
+  "hypothesis": "Ten-day price momentum delivered with lower average traded amount may contain more persistent information.",
+  "inputs": [
+    "close",
+    "amount"
+  ],
+  "lookback": 11,
+  "parent_factor_ids": [],
+  "primary_change": "new_factor",
+  "rationale": "This tests one explicit amount-scaling transformation of a fixed trailing momentum horizon without adding unavailable fields.",
+  "round_number": 5,
+  "run_id": "phase4-formal",
+  "schema_version": 1,
+  "title": "Amount scaled price efficiency"
+}

@@ -1,0 +1,16 @@
+factor_id: F1003
+name: normalized_range_10d
+hypothesis: Stocks with persistently narrow normalized daily ranges may outperform
+  high-range peers at short horizons.
+formula: Mean((high - low) / close, 10)
+inputs:
+- high
+- low
+- close
+lookback: 10
+direction: -1
+family: volatility
+author: codex
+parent_factor_ids: []
+created_at: '2026-07-11T12:03:00+08:00'
+status: candidate

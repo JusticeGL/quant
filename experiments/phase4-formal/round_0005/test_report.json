@@ -1,0 +1,9 @@
+{
+  "factor_id": "F1004",
+  "future_perturbation_invariant": true,
+  "locked_areas_unchanged": true,
+  "passed": true,
+  "prefix_invariant": true,
+  "schema_version": 1,
+  "static_issues": []
+}

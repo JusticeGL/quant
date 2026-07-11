@@ -1,0 +1,15 @@
+factor_id: F1004
+name: amount_scaled_momentum_10d
+hypothesis: Ten-day price momentum delivered with lower average traded amount may
+  contain more persistent information.
+formula: (close / Ref(close, 10) - 1) / Log(1 + Mean(amount, 10))
+inputs:
+- close
+- amount
+lookback: 11
+direction: 1
+family: price_liquidity
+author: codex
+parent_factor_ids: []
+created_at: '2026-07-11T12:04:00+08:00'
+status: candidate

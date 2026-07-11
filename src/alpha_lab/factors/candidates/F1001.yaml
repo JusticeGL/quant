@@ -1,0 +1,15 @@
+factor_id: F1001
+name: overnight_gap_reversal_5d
+hypothesis: Repeated positive overnight gaps may mean-revert over the next short holding
+  horizon.
+formula: Mean(open / Ref(close, 1) - 1, 5)
+inputs:
+- open
+- close
+lookback: 6
+direction: -1
+family: reversal
+author: codex
+parent_factor_ids: []
+created_at: '2026-07-11T12:01:00+08:00'
+status: candidate

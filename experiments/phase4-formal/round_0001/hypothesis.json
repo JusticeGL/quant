@@ -1,0 +1,27 @@
+{
+  "changed_variable": "factor_formula",
+  "created_at": "2026-07-11T12:00:00+08:00",
+  "direction": 1,
+  "expected_effect": "Positive validation rank IC if close-location persistence exists.",
+  "factor_id": "F1000",
+  "falsification_criteria": [
+    "Any locked promotion check fails.",
+    "Leakage invariance does not pass."
+  ],
+  "family": "price_action",
+  "formula": "Mean((close - low) / (high - low) - 0.5, 5)",
+  "hypothesis": "Stocks closing persistently near the upper daily range may retain short-horizon strength.",
+  "inputs": [
+    "high",
+    "low",
+    "close"
+  ],
+  "lookback": 5,
+  "parent_factor_ids": [],
+  "primary_change": "new_factor",
+  "rationale": "Close location uses only same-day OHLC information and a bounded trailing mean isolates persistence without future data.",
+  "round_number": 1,
+  "run_id": "phase4-formal",
+  "schema_version": 1,
+  "title": "Trailing close location strength"
+}

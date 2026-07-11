@@ -1,0 +1,26 @@
+{
+  "changed_variable": "factor_formula",
+  "created_at": "2026-07-11T12:01:00+08:00",
+  "direction": -1,
+  "expected_effect": "Negative raw validation rank IC consistent with gap reversal.",
+  "factor_id": "F1001",
+  "falsification_criteria": [
+    "Any locked promotion check fails.",
+    "Leakage invariance does not pass."
+  ],
+  "family": "reversal",
+  "formula": "Mean(open / Ref(close, 1) - 1, 5)",
+  "hypothesis": "Repeated positive overnight gaps may mean-revert over the next short holding horizon.",
+  "inputs": [
+    "open",
+    "close"
+  ],
+  "lookback": 6,
+  "parent_factor_ids": [],
+  "primary_change": "new_factor",
+  "rationale": "The gap compares today open with the prior close and changes only the signal transformation under a fixed five-day window.",
+  "round_number": 2,
+  "run_id": "phase4-formal",
+  "schema_version": 1,
+  "title": "Trailing overnight gap reversal"
+}

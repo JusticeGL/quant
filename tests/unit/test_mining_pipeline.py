@@ -128,6 +128,46 @@ def test_proposal_rejects_metadata_that_does_not_match_hypothesis() -> None:
         CandidateProposal.model_validate(document)
 
 
+def test_initialization_accepts_cli_relative_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, _ = _sandbox(tmp_path, monkeypatch)
+    monkeypatch.chdir(repo)
+
+    run_dir = initialize_mining_run(
+        "relative-path-test",
+        1,
+        repo_root=Path.cwd(),
+        config_dir=Path("config"),
+        data_dir=Path("data"),
+        experiments_dir=Path("experiments"),
+    )
+
+    assert run_dir == Path("experiments/relative-path-test")
+    assert (run_dir / "run_manifest.json").is_file()
+
+
+def test_initialization_accepts_a_pre_staged_proposals_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, data = _sandbox(tmp_path, monkeypatch)
+    proposals = repo / "experiments" / "pre-staged-test" / "proposals"
+    proposals.mkdir(parents=True)
+    (proposals / "round_0001.json").write_text("{}\n", encoding="utf-8")
+
+    run_dir = initialize_mining_run(
+        "pre-staged-test",
+        1,
+        repo_root=repo,
+        config_dir=repo / "config",
+        data_dir=data,
+        experiments_dir=repo / "experiments",
+    )
+
+    assert (run_dir / "run_manifest.json").is_file()
+    assert (proposals / "round_0001.json").is_file()
+
+
 def test_five_round_loop_retains_evaluator_errors_and_continues(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

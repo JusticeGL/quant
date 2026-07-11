@@ -1,0 +1,27 @@
+{
+  "changed_variable": "factor_formula",
+  "created_at": "2026-07-11T12:03:00+08:00",
+  "direction": -1,
+  "expected_effect": "Negative raw validation rank IC consistent with a low-range premium.",
+  "factor_id": "F1003",
+  "falsification_criteria": [
+    "Any locked promotion check fails.",
+    "Leakage invariance does not pass."
+  ],
+  "family": "volatility",
+  "formula": "Mean((high - low) / close, 10)",
+  "hypothesis": "Stocks with persistently narrow normalized daily ranges may outperform high-range peers at short horizons.",
+  "inputs": [
+    "high",
+    "low",
+    "close"
+  ],
+  "lookback": 10,
+  "parent_factor_ids": [],
+  "primary_change": "new_factor",
+  "rationale": "The signal changes only the volatility proxy by averaging a scale-free intraday range over trailing observations.",
+  "round_number": 4,
+  "run_id": "phase4-formal",
+  "schema_version": 1,
+  "title": "Normalized range compression"
+}
