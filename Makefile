@@ -3,9 +3,14 @@ RESEARCH_SERVICE := research
 LOCK_SERVICE := locker
 CONFIG_DIR ?= config
 DATA_DIR ?= data
+EXPERIMENTS_DIR ?= experiments
+ARTIFACTS_DIR ?= artifacts
+ROUNDS ?= 5
 DATA_END_DATE_ARG = $(if $(END_DATE),--end-date $(END_DATE),)
+PROPOSAL_ARG = $(if $(PROPOSAL),--proposal $(PROPOSAL),)
+PROPOSALS_DIR_ARG = $(if $(PROPOSALS_DIR),--proposals-dir $(PROPOSALS_DIR),)
 
-.PHONY: build shell lock smoke lint test data-bootstrap data-update data-validate qlib-export db-init db-check baseline factor-list factor-eval
+.PHONY: build shell lock smoke lint test data-bootstrap data-update data-validate qlib-export db-init db-check baseline factor-list factor-eval mining-round mining-loop report
 
 build:
 	$(COMPOSE) build $(RESEARCH_SERVICE)
@@ -42,6 +47,15 @@ factor-list:
 
 factor-eval:
 	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli factor-eval --id $(ID) --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR) $(if $(SNAPSHOT),--snapshot $(SNAPSHOT),)
+
+mining-round:
+	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli mining-round --run $(RUN) --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR) --experiments-dir $(EXPERIMENTS_DIR) --artifacts-dir $(ARTIFACTS_DIR) $(PROPOSAL_ARG)
+
+mining-loop:
+	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli mining-loop --run $(RUN) --rounds $(ROUNDS) --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR) --experiments-dir $(EXPERIMENTS_DIR) --artifacts-dir $(ARTIFACTS_DIR) $(PROPOSALS_DIR_ARG)
+
+report:
+	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli mining-report --run $(RUN) --experiments-dir $(EXPERIMENTS_DIR)
 
 smoke:
 	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.smoke

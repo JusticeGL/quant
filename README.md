@@ -1,12 +1,13 @@
 # A-Share Alpha Lab
 
-这是 A 股自动因子研究平台的 Phase 3 自定义因子评价环境。项目在 Linux Python 3.11 容器中
+这是 A 股自动因子研究平台的 Phase 4 可审计因子挖掘环境。项目在 Linux Python 3.11 容器中
 完成 Phase 1 的不可变数据闭环，并使用 Qlib Alpha158、确定性 LightGBM、validation
 信号分析和 Top-K 组合回测生成 Phase 2 基线；Phase 3 增加严格因子契约、注册表、固定
-评价程序和防泄漏门禁。规格书列出的 Baostock 只在 AKShare 失败时作为显式备用源。
+评价程序和防泄漏门禁；Phase 4 在其上增加单点假设、候选生成、固定评价、结构化决策和
+可恢复多轮日志。规格书列出的 Baostock 只在 AKShare 失败时作为显式备用源。
 
-当前不包含自动因子挖掘、自动接受/拒绝决策、锁定测试集评价或交易账户连接；这些属于
-后续阶段。
+当前不包含研究级历史动态股票池、锁定测试集评价或交易账户连接；这些属于后续阶段。
+Phase 4 的 `ACCEPT` 只表示进入人工复核，不会自动修改已接受因子注册表。
 
 ## 研究边界
 
@@ -131,6 +132,32 @@ make factor-eval ID=F0003
 
 评价通过门槛只得到 `eligible_for_review=true`，不会自动接受。完整协议见
 [Phase 3 因子评价说明](docs/phase3_factor_evaluation.md)。
+
+## Phase 4 因子挖掘
+
+先按 `schemas/proposal.schema.json` 创建一轮提案；Codex 可使用仓库内的
+`.agents/skills/factor-mine/SKILL.md`。正式 Python 评价始终在容器中运行：
+
+```bash
+# 单轮；默认读取 experiments/<run>/proposals/round_0001.json
+make mining-round RUN=phase4-example
+
+# 或明确给出提案文件
+make mining-round RUN=phase4-example PROPOSAL=/workspace/proposals/round_0001.json
+
+# 预先准备 5 份逐轮提案后运行/恢复整个循环
+make mining-loop RUN=phase4-example ROUNDS=5 PROPOSALS_DIR=/workspace/proposals
+
+# 重建小型审计报告
+make report RUN=phase4-example
+```
+
+每轮只允许一个主要变化。管线先锁定切分、成本、评价程序、泄漏测试和当前数据 manifest
+的 SHA256，再做静态检查、防泄漏测试和固定 validation 评价。`decision.json` 的
+ACCEPT/REJECT 由固定 promotion checks 约束，且始终标记
+`human_approval_required=true`。候选文件不可变；REJECT/ERROR 记录不会删除。成功评价和
+建议会登记到 DuckDB 的 `research.experiment_*` 表。完整协议见
+[Phase 4 因子挖掘说明](docs/phase4_factor_mining.md)。
 
 也可以显式选择快照：
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Factor Mine"
+  short_description: "Propose and evaluate one auditable factor change"
+  default_prompt: "Use $factor-mine to propose one bounded factor hypothesis for the current mining round."

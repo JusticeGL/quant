@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Factor Mining Combined Proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "hypothesis", "metadata", "source_code"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "hypothesis": {"$ref": "#/$defs/hypothesis"},
+    "metadata": {"$ref": "#/$defs/metadata"},
+    "source_code": {"type": "string", "minLength": 40}
+  },
+  "$defs": {
+    "hypothesis": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "run_id", "round_number", "factor_id",
+        "title", "hypothesis", "rationale", "primary_change", "changed_variable",
+        "parent_factor_ids", "inputs", "lookback", "direction", "family",
+        "formula", "expected_effect", "falsification_criteria", "created_at"],
+      "properties": {
+        "schema_version": {"const": 1}, "run_id": {"type": "string"},
+        "round_number": {"type": "integer", "minimum": 1},
+        "factor_id": {"type": "string", "pattern": "^F[0-9]{4}$"},
+        "title": {"type": "string"}, "hypothesis": {"type": "string"},
+        "rationale": {"type": "string"},
+        "primary_change": {"enum": ["new_factor", "operator", "window", "combination"]},
+        "changed_variable": {"type": "string"},
+        "parent_factor_ids": {"type": "array", "items": {"type": "string"}},
+        "inputs": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "lookback": {"type": "integer", "minimum": 1},
+        "direction": {"enum": [-1, 1]}, "family": {"type": "string"},
+        "formula": {"type": "string"}, "expected_effect": {"type": "string"},
+        "falsification_criteria": {"type": "array", "minItems": 1,
+          "items": {"type": "string"}},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "metadata": {
+      "type": "object", "additionalProperties": false,
+      "required": ["factor_id", "name", "hypothesis", "formula", "inputs",
+        "lookback", "direction", "family", "author", "parent_factor_ids",
+        "created_at", "status"],
+      "properties": {
+        "factor_id": {"type": "string", "pattern": "^F[0-9]{4}$"},
+        "name": {"type": "string"}, "hypothesis": {"type": "string"},
+        "formula": {"type": "string"},
+        "inputs": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "lookback": {"type": "integer", "minimum": 1},
+        "direction": {"enum": [-1, 1]}, "family": {"type": "string"},
+        "author": {"type": "string"},
+        "parent_factor_ids": {"type": "array", "items": {"type": "string"}},
+        "created_at": {"type": "string", "format": "date-time"},
+        "status": {"const": "candidate"}
+      }
+    }
+  }
+}

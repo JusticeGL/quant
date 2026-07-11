@@ -19,11 +19,9 @@ def test_makefile_exposes_database_targets() -> None:
         assert f"\n{target}:" in makefile
 
 
-def test_project_does_not_create_backtest_or_mining_top_level_modules() -> None:
+def test_project_does_not_create_separate_backtest_top_level_module() -> None:
     package = ROOT / "src" / "alpha_lab"
-
-    for later_phase in ("backtest", "mining"):
-        assert not (package / later_phase).exists()
+    assert not (package / "backtest").exists()
 
 
 def test_generated_data_ignore_is_anchored_to_repository_root() -> None:

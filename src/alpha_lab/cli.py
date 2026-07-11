@@ -21,6 +21,12 @@ from alpha_lab.database.catalog import (
 )
 from alpha_lab.evaluation.pipeline import evaluate_factor
 from alpha_lab.factors.registry import FactorRegistry
+from alpha_lab.mining.pipeline import (
+    initialize_mining_run,
+    render_mining_report,
+    run_mining_loop,
+    run_mining_round,
+)
 
 app = typer.Typer(
     add_completion=False,
@@ -278,6 +284,122 @@ def factor_eval(
             "eligible_for_review": result.eligible_for_review,
         }
     )
+
+
+@app.command("mining-init")
+def mining_init(
+    run_id: Annotated[str, typer.Option("--run", help="Mining run ID.")],
+    rounds: Annotated[int, typer.Option(min=1)] = 5,
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    experiments_dir: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "experiments"
+    ),
+) -> None:
+    """Create or reopen a Phase 4 manifest and research brief."""
+    try:
+        run_dir = initialize_mining_run(
+            run_id,
+            rounds,
+            repo_root=Path.cwd(),
+            config_dir=config_dir,
+            data_dir=data_dir,
+            experiments_dir=experiments_dir,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        typer.echo(f"mining initialization failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _render({"run_id": run_id, "run_dir": str(run_dir), "rounds": rounds})
+
+
+@app.command("mining-round")
+def mining_round(
+    run_id: Annotated[str, typer.Option("--run", help="Mining run ID.")],
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    experiments_dir: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "experiments"
+    ),
+    artifacts_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("artifacts"),
+    proposal: Annotated[Path | None, typer.Option(dir_okay=False)] = None,
+) -> None:
+    """Evaluate one staged Phase 4 factor proposal and retain its decision."""
+    try:
+        result = run_mining_round(
+            run_id,
+            repo_root=Path.cwd(),
+            config_dir=config_dir,
+            data_dir=data_dir,
+            experiments_dir=experiments_dir,
+            artifacts_dir=artifacts_dir,
+            proposal_path=proposal,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        typer.echo(f"mining round failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _render(
+        {
+            "run_id": result.run_id,
+            "round_number": result.round_number,
+            "factor_id": result.factor_id,
+            "decision": result.decision,
+            "round_dir": str(result.round_dir),
+            "decision_path": str(result.decision_path),
+        }
+    )
+
+
+@app.command("mining-loop")
+def mining_loop(
+    run_id: Annotated[str, typer.Option("--run", help="Mining run ID.")],
+    rounds: Annotated[int, typer.Option(min=1)] = 5,
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    experiments_dir: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "experiments"
+    ),
+    artifacts_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("artifacts"),
+    proposals_dir: Annotated[Path | None, typer.Option(file_okay=False)] = None,
+) -> None:
+    """Run or resume a bounded Phase 4 mining loop."""
+    try:
+        results = run_mining_loop(
+            run_id,
+            rounds,
+            repo_root=Path.cwd(),
+            config_dir=config_dir,
+            data_dir=data_dir,
+            experiments_dir=experiments_dir,
+            artifacts_dir=artifacts_dir,
+            proposals_dir=proposals_dir,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        typer.echo(f"mining loop failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _render(
+        {
+            "run_id": run_id,
+            "completed_rounds": len(results),
+            "decisions": [item.decision for item in results],
+            "report": str(experiments_dir / run_id / "final_report.md"),
+        }
+    )
+
+
+@app.command("mining-report")
+def mining_report(
+    run_id: Annotated[str, typer.Option("--run", help="Mining run ID.")],
+    experiments_dir: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "experiments"
+    ),
+) -> None:
+    """Regenerate the small Markdown audit report for a mining run."""
+    try:
+        path = render_mining_report(run_id, experiments_dir)
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        typer.echo(f"mining report failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _render({"run_id": run_id, "report": str(path)})
 
 
 if __name__ == "__main__":

@@ -48,10 +48,17 @@ class FactorRegistry:
             *self.config.accepted_factor_ids,
             *self.config.rejected_factor_ids,
         }
-        if configured != set(self._candidates):
+        missing = configured - set(self._candidates)
+        unlisted = set(self._candidates) - configured
+        invalid_unlisted = sorted(
+            factor_id
+            for factor_id in unlisted
+            if self._candidates[factor_id].metadata.status != "candidate"
+        )
+        if missing or invalid_unlisted:
             raise ValueError(
-                "factor registry IDs do not match candidate metadata: "
-                f"configured={sorted(configured)}, files={sorted(self._candidates)}"
+                "factor registry status mismatch: "
+                f"missing={sorted(missing)}, non_candidate_unlisted={invalid_unlisted}"
             )
 
     def all(self) -> list[FactorCandidate]:

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Factor Mining Decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "round_number", "factor_id", "decision",
+    "rationale", "passed_checks", "failed_checks", "eligible_for_review",
+    "human_approval_required", "factor_result_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string"},
+    "round_number": {"type": "integer", "minimum": 1},
+    "factor_id": {"type": "string", "pattern": "^F[0-9]{4}$"},
+    "decision": {"enum": ["ACCEPT", "REJECT", "ERROR"]},
+    "rationale": {"type": "string", "minLength": 5},
+    "passed_checks": {"type": "array", "items": {"type": "string"}},
+    "failed_checks": {"type": "array", "items": {"type": "string"}},
+    "eligible_for_review": {"type": "boolean"},
+    "human_approval_required": {"const": true},
+    "factor_result_sha256": {"type": ["string", "null"]}
+  }
+}

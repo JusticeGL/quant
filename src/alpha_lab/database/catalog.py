@@ -951,6 +951,61 @@ def record_factor_evaluation(
         )
 
 
+def record_mining_decision(
+    database_path: Path,
+    experiment_id: str,
+    policy_version: str,
+    decision_path: Path,
+) -> None:
+    """Record one immutable Phase 4 recommendation for an evaluated experiment."""
+    from alpha_lab.mining.models import MiningDecision
+
+    decision = MiningDecision.model_validate_json(
+        decision_path.read_text(encoding="utf-8")
+    )
+    reason = decision.model_dump(mode="json")
+    reason_json = _canonical_json(reason)
+    with _catalog_write_lock(database_path):
+        initialize_database(database_path)
+        with duckdb.connect(str(database_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO research.experiment_decision
+                    (experiment_id, decision, reason, policy_version)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (experiment_id) DO NOTHING
+                """,
+                [
+                    experiment_id,
+                    decision.decision.lower(),
+                    reason_json,
+                    policy_version,
+                ],
+            )
+            stored = connection.execute(
+                """
+                SELECT decision, reason, policy_version
+                FROM research.experiment_decision
+                WHERE experiment_id = ?
+                """,
+                [experiment_id],
+            ).fetchone()
+            if stored is None:
+                raise RuntimeError(
+                    f"mining decision was not recorded for {experiment_id}"
+                )
+            expected = (decision.decision.lower(), reason_json, policy_version)
+            actual = (
+                str(stored[0]),
+                _canonical_json(json.loads(str(stored[1]))),
+                str(stored[2]),
+            )
+            if actual != expected:
+                raise RuntimeError(
+                    f"mining decision is immutable for experiment {experiment_id}"
+                )
+
+
 def _record_factor_evaluation_unlocked(
     database_path: Path,
     config_dir: Path,

@@ -23,6 +23,6 @@ def test_test_split_is_locked_and_human_approval_only() -> None:
     assert splits["test"]["access"] == "human_approval_only"
 
 
-def test_project_does_not_create_automatic_mining_module() -> None:
-    package = ROOT / "src" / "alpha_lab"
-    assert not (package / "mining").exists()
+def test_phase2_locked_assets_remain_present_for_later_phases() -> None:
+    for name in ("splits.yaml", "costs.yaml"):
+        assert (ROOT / "config" / name).is_file()

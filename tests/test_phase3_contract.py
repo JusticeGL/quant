@@ -31,5 +31,6 @@ def test_three_reference_factors_have_code_metadata_and_tests() -> None:
     assert (ROOT / "tests" / "unit" / "test_factor_candidates.py").is_file()
 
 
-def test_phase3_does_not_create_automatic_mining_loop() -> None:
-    assert not (ROOT / "src" / "alpha_lab" / "mining").exists()
+def test_phase3_evaluator_remains_separate_from_phase4_orchestration() -> None:
+    assert (ROOT / "src" / "alpha_lab" / "evaluation" / "pipeline.py").is_file()
+    assert (ROOT / "src" / "alpha_lab" / "mining" / "pipeline.py").is_file()

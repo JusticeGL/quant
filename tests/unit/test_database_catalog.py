@@ -15,6 +15,7 @@ from alpha_lab.database.catalog import (
     initialize_database,
     record_baseline_run,
     record_factor_evaluation,
+    record_mining_decision,
     sync_repository_metadata,
 )
 
@@ -309,3 +310,86 @@ def test_factor_evaluation_registration_is_idempotent(tmp_path: Path) -> None:
         ).fetchone()
 
     assert counts == (1, 1, 1, 1, 6, 2)
+
+
+def test_mining_decision_registration_is_idempotent(tmp_path: Path) -> None:
+    database_path = tmp_path / "metadata.duckdb"
+    initialize_database(database_path)
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO meta.dataset_snapshot
+                (snapshot_id, snapshot_type, status, identity_sha256, schema_version)
+            VALUES ('p1-decision-test', 'market', 'valid', ?, 1)
+            """,
+            ["a" * 64],
+        )
+        connection.execute(
+            """
+            INSERT INTO ref.security
+                (security_id, asset_type, exchange, currency, lot_size)
+            VALUES ('CN:SH:600519', 'stock', 'SSE', 'CNY', 100)
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO research.universe_definition
+                (universe_id, name, construction_rule, survivorship_free,
+                 research_eligible, config_sha256)
+            VALUES ('u-test', 'test', '{}', false, false, ?)
+            """,
+            ["9" * 64],
+        )
+        connection.execute(
+            """
+            INSERT INTO research.experiment_run
+                (experiment_id, data_snapshot_id, universe_id,
+                 split_policy_sha256, code_commit, status)
+            VALUES ('factor-f1000-test', 'p1-decision-test', 'u-test', ?, ?, 'success')
+            """,
+            ["b" * 64, "c" * 40],
+        )
+
+    decision_path = tmp_path / "decision.json"
+    decision_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": "phase4-test",
+                "round_number": 1,
+                "factor_id": "F1000",
+                "decision": "REJECT",
+                "rationale": "Fixed promotion checks did not all pass.",
+                "passed_checks": ["leakage"],
+                "failed_checks": ["ic"],
+                "eligible_for_review": False,
+                "human_approval_required": True,
+                "factor_result_sha256": "d" * 64,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    record_mining_decision(
+        database_path,
+        "factor-f1000-test",
+        "phase4_factor_mining_v1",
+        decision_path,
+    )
+    record_mining_decision(
+        database_path,
+        "factor-f1000-test",
+        "phase4_factor_mining_v1",
+        decision_path,
+    )
+
+    with duckdb.connect(str(database_path), read_only=True) as connection:
+        row = connection.execute(
+            """
+            SELECT decision, reason->>'factor_id', reason->>'human_approval_required',
+                   policy_version
+            FROM research.experiment_decision
+            """
+        ).fetchone()
+
+    assert row == ("reject", "F1000", "true", "phase4_factor_mining_v1")

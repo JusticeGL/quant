@@ -40,7 +40,9 @@ htmlcov/
 experiments/**/*
 !experiments/**/
 !experiments/**/run_manifest.json
+!experiments/**/research_brief.md
 !experiments/**/hypothesis.json
+!experiments/**/test_report.json
 !experiments/**/factor_result.json
 !experiments/**/decision.json
 !experiments/**/final_report.md

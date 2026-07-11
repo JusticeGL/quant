@@ -1,0 +1,12 @@
+schema_version: 1
+policy_id: phase4_factor_mining_v1
+default_rounds: 5
+maximum_rounds: 20
+candidate_id_minimum: 1000
+candidate_id_maximum: 8999
+maximum_lookback: 60
+allowed_primary_changes: [new_factor, operator, window, combination]
+require_human_approval_for_acceptance: true
+notes: >-
+  Mining may propose one primary change per round. ACCEPT is only a recommendation
+  for human review and never updates accepted_factor_ids automatically.

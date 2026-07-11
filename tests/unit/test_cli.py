@@ -19,5 +19,9 @@ def test_cli_registers_data_database_and_baseline_commands() -> None:
         "baseline",
         "factor-list",
         "factor-eval",
+        "mining-init",
+        "mining-round",
+        "mining-loop",
+        "mining-report",
     ):
         assert command in result.output
