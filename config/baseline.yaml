@@ -1,0 +1,32 @@
+schema_version: 1
+experiment_name: alpha158_lightgbm_engineering_baseline
+random_seed: 20260711
+feature_set: Alpha158
+label:
+  name: next_open_return
+  expression: Ref($open,-2)/Ref($open,-1)-1
+  execution_delay_days: 1
+  holding_days: 1
+model:
+  objective: regression_l2
+  n_estimators: 200
+  learning_rate: 0.03
+  num_leaves: 31
+  max_depth: -1
+  min_child_samples: 10
+  subsample: 1.0
+  colsample_bytree: 1.0
+  reg_alpha: 0.0
+  reg_lambda: 1.0
+  n_jobs: 1
+strategy:
+  top_k: 3
+  initial_cash: 1000000.0
+  lot_size: 100
+  exclude_st: true
+  infer_missing_price_limits: true
+  main_board_limit_ratio: 0.10
+  st_limit_ratio: 0.05
+  price_limit_tolerance: 0.001
+annualization_days: 252
+engineering_only: true

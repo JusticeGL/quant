@@ -8,6 +8,7 @@ from typing import Annotated, Any
 import pandas as pd
 import typer
 
+from alpha_lab.baseline.pipeline import run_baseline
 from alpha_lab.data.normalize import to_qlib_instrument
 from alpha_lab.data.pipeline import run_ingestion
 from alpha_lab.data.qlib_export import export_qlib
@@ -21,7 +22,7 @@ from alpha_lab.database.catalog import (
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="A-Share Alpha Lab Phase 1 data commands.",
+    help="A-Share Alpha Lab data and reproducible baseline commands.",
 )
 
 
@@ -178,6 +179,33 @@ def db_check(
     _render(report)
     if not report["healthy"]:
         raise typer.Exit(code=2)
+
+
+@app.command("baseline")
+def baseline(
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    output_dir: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "artifacts/baseline"
+    ),
+    snapshot: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Run the deterministic Phase 2 Alpha158 + LightGBM engineering baseline."""
+    try:
+        result = run_baseline(config_dir, data_dir, output_dir, snapshot_id=snapshot)
+    except (RuntimeError, ValueError) as error:
+        typer.echo(f"baseline failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _render(
+        {
+            "run_id": result.run_id,
+            "output": str(result.output_dir),
+            "manifest": str(result.manifest_path),
+            "markdown_report": str(result.markdown_report_path),
+            "html_report": str(result.html_report_path),
+            "reproducibility_sha256": result.reproducibility_sha256,
+        }
+    )
 
 
 if __name__ == "__main__":

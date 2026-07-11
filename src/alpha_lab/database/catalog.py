@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import os
 from dataclasses import dataclass
 from datetime import date
 from importlib import resources
@@ -725,6 +726,181 @@ def _sync_quality_results(
             ],
         )
     return len(checks)
+
+
+def record_baseline_run(
+    database_path: Path,
+    config_dir: Path,
+    data_root: Path,
+    manifest_path: Path,
+) -> None:
+    """Record one successful Phase 2 run and its artifacts in the catalog."""
+    from alpha_lab.baseline.config import load_phase2_config
+
+    sync_repository_metadata(database_path, config_dir, data_root)
+    phase1 = load_phase1_config(config_dir)
+    phase2 = load_phase2_config(config_dir)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    run_id = str(manifest["run_id"])
+    snapshot_id = str(manifest["data_snapshot_id"])
+    output_dir = manifest_path.parent
+
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            for policy_id, policy_type, policy_hash in (
+                (phase2.splits.policy_id, "split", phase2.split_sha256),
+                (phase2.costs.policy_id, "cost", phase2.cost_sha256),
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO policy.policy_version
+                        (policy_id, policy_type, version, config_sha256, locked)
+                    VALUES (?, ?, '1', ?, true)
+                    ON CONFLICT (policy_id) DO NOTHING
+                    """,
+                    [policy_id, policy_type, policy_hash],
+                )
+
+            for index, rule in enumerate(phase2.costs.rules):
+                for side in ("buy", "sell"):
+                    stamp = (
+                        rule.stamp_duty_rate_buy
+                        if side == "buy"
+                        else rule.stamp_duty_rate_sell
+                    )
+                    transfer = (
+                        rule.transfer_fee_rate_buy
+                        if side == "buy"
+                        else rule.transfer_fee_rate_sell
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO policy.cost_rule
+                            (rule_id, policy_id, market, side, effective_from,
+                             effective_to, commission_rate, minimum_commission,
+                             stamp_duty_rate, transfer_fee_rate)
+                        VALUES (?, ?, 'CN_A_SHARE', ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (rule_id) DO NOTHING
+                        """,
+                        [
+                            f"{phase2.costs.policy_id}-{index}-{side}",
+                            phase2.costs.policy_id,
+                            side,
+                            rule.effective_from,
+                            rule.effective_to,
+                            rule.commission_rate,
+                            rule.minimum_commission,
+                            stamp,
+                            transfer,
+                        ],
+                    )
+
+            connection.execute(
+                """
+                INSERT INTO research.experiment_run
+                    (experiment_id, data_snapshot_id, universe_id,
+                     split_policy_sha256, cost_policy_sha256, code_commit,
+                     random_seed, status, started_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'success',
+                        current_timestamp, current_timestamp)
+                ON CONFLICT (experiment_id) DO NOTHING
+                """,
+                [
+                    run_id,
+                    snapshot_id,
+                    phase1.universe.sample_id,
+                    phase2.split_sha256,
+                    phase2.cost_sha256,
+                    str(manifest["git"]["commit"]),
+                    phase2.baseline.random_seed,
+                ],
+            )
+
+            metrics = {
+                **{
+                    f"signal_{key}": value
+                    for key, value in manifest["signal_analysis"].items()
+                    if key != "daily"
+                },
+                **{
+                    f"backtest_{key}": value
+                    for key, value in manifest["backtest"]["metrics"].items()
+                },
+            }
+            for name, value in metrics.items():
+                if value is None or not isinstance(value, (int, float)):
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO research.experiment_metric
+                        (experiment_id, split_name, metric_name, metric_value)
+                    VALUES (?, 'validation', ?, ?)
+                    ON CONFLICT
+                        (experiment_id, split_name, metric_name, period)
+                    DO NOTHING
+                    """,
+                    [run_id, name, float(value)],
+                )
+
+            artifact_ids: dict[str, str] = {}
+            artifact_specs = {
+                "predictions.parquet": ("research", "baseline.signal", "parquet"),
+                "backtest_daily.parquet": (
+                    "research",
+                    "baseline.backtest_daily",
+                    "parquet",
+                ),
+                "trades.parquet": ("research", "baseline.trades", "parquet"),
+                "lightgbm_model.txt": ("research", "baseline.model", "lightgbm"),
+                "run_manifest.json": ("report", "baseline.manifest", "json"),
+                "baseline_report.md": ("report", "baseline.report", "markdown"),
+                "baseline_report.html": ("report", "baseline.report", "html"),
+            }
+            for name, (layer, dataset_name, artifact_format) in artifact_specs.items():
+                path = output_dir / name
+                relative_path = Path(
+                    os.path.relpath(path.resolve(), start=data_root.resolve())
+                ).as_posix()
+                artifact_ids[name] = _upsert_artifact(
+                    connection,
+                    data_root,
+                    layer=layer,
+                    dataset_name=dataset_name,
+                    relative_path=relative_path,
+                    artifact_format=artifact_format,
+                    sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                    schema_version=1,
+                    source_id=None,
+                    row_count=None,
+                    min_event_date=None,
+                    max_event_date=None,
+                )
+
+            connection.execute(
+                """
+                INSERT INTO research.backtest_run
+                    (backtest_id, experiment_id, data_snapshot_id,
+                     signal_artifact_id, position_artifact_id,
+                     trade_artifact_id, report_artifact_id, status, summary)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'success', ?)
+                ON CONFLICT (backtest_id) DO NOTHING
+                """,
+                [
+                    f"{run_id}-topk",
+                    run_id,
+                    snapshot_id,
+                    artifact_ids["predictions.parquet"],
+                    artifact_ids["backtest_daily.parquet"],
+                    artifact_ids["trades.parquet"],
+                    artifact_ids["baseline_report.html"],
+                    _canonical_json(manifest["backtest"]),
+                ],
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
 
 
 def check_database(database_path: Path, data_root: Path) -> dict[str, Any]:

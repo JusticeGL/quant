@@ -1,11 +1,12 @@
 # A-Share Alpha Lab
 
-这是 A 股自动因子研究平台的 Phase 1 最小数据闭环。项目在 Linux
-Python 3.11 容器中以 AKShare 为主源获取固定小样本，保存不可变 raw 缓存，生成标准
-Parquet、质量报告、确定性快照清单和 Qlib 文件存储。规格书列出的 Baostock 只在
+这是 A 股自动因子研究平台的 Phase 2 可复现基线。项目在 Linux Python 3.11 容器中
+完成 Phase 1 的不可变数据闭环，并使用 Qlib Alpha158、确定性 LightGBM、validation
+信号分析和 Top-K 组合回测生成 Markdown/HTML 报告。规格书列出的 Baostock 只在
 AKShare 失败时作为显式备用源。
 
-当前没有 Alpha158、模型训练、因子评价、回测或交易账户连接；这些属于后续阶段。
+当前不包含自定义因子评价、自动因子挖掘、锁定测试集评价或交易账户连接；这些属于
+后续阶段。
 
 ## 研究边界
 
@@ -16,7 +17,8 @@ AKShare 失败时作为显式备用源。
 - 默认使用 AKShare `stock_zh_a_hist` 的不复权日线。Phase 1 不推断复权因子、涨跌停、
   上市或退市状态；AKShare 行的停牌与 ST 状态也保持缺失。备用源实际提供的停牌和 ST
   状态会保留，并由逐列缺失率反映覆盖差异。
-- 不下载全量 A 股数据，不运行回测，不读取券商凭据，也不连接任何交易账户。
+- 不下载全量 A 股数据，不读取券商凭据，也不连接任何交易账户。
+- Phase 2 回测仅在 validation 上验证工程链路；不访问或报告锁定 test。
 
 ## 正式运行环境
 
@@ -66,6 +68,38 @@ make db-init
 # 只读验证 schema、逻辑外键和 artifact 文件
 make db-check
 ```
+
+## Phase 2 基线
+
+```bash
+# 从最新 Qlib 快照运行 Alpha158 + LightGBM + validation Top-K
+make baseline
+
+# 或显式固定快照
+make baseline SNAPSHOT=p1-<snapshot-id>
+```
+
+配置分别位于 `config/baseline.yaml`、`config/splits.yaml` 和
+`config/costs.yaml`。切分和成本配置带稳定 SHA256 并作为锁定资产；当前短样本使用
+`engineering_only` 切分。训练标签会按交易日清除跨越 train 边界的观测，validation
+标签只允许使用 test 前的隔离日期，锁定 test 不被载入、打分、评价或写入报告。
+
+每次运行的确定性身份由数据快照、Qlib 内容哈希、三份配置、固定种子和 Git commit
+组成。产物写入被 Git 忽略的 `artifacts/baseline/<run-id>/`：
+
+```text
+run_manifest.json
+predictions.parquet
+lightgbm_model.txt
+backtest_daily.parquet
+trades.parquet
+baseline_report.md
+baseline_report.html
+```
+
+相同 run ID 再次执行时必须得到相同 `reproducibility_sha256`，否则命令失败且不会覆盖
+旧产物。成功运行会把政策版本、实验、指标、artifact 和回测摘要登记到
+`data/metadata.duckdb`。详细协议见 [Phase 2 基线说明](docs/phase2_baseline.md)。
 
 也可以显式选择快照：
 
@@ -158,4 +192,6 @@ Parquet 文件。
   数据源原值。研究使用前仍需做抽样交叉核验。
 - ARM64 依赖失败时先保留错误并诊断。项目不会自动切到 `linux/amd64`。备用端点只有在
   字段可等价标准化时才启用，且来源不会被伪装成 AKShare。
-- Phase 1 的 Qlib 产物只用于接口和可复现性验证，不应直接进入模型训练或回测。
+- 当前 Phase 2 使用 Phase 1 小样本 Qlib 产物跑通训练和回测，但仍只构成工程验证；
+  报告中的收益、
+  IC 和 Sharpe 不可解释为研究结论或未来收益预期。

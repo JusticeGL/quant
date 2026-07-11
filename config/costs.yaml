@@ -1,0 +1,20 @@
+schema_version: 1
+policy_id: a_share_engineering_costs_v1
+locked: true
+currency: CNY
+rules:
+  - effective_from: 2023-08-28
+    effective_to: null
+    commission_rate: 0.0003
+    minimum_commission: 5.0
+    stamp_duty_rate_buy: 0.0
+    stamp_duty_rate_sell: 0.0005
+    transfer_fee_rate_buy: 0.00001
+    transfer_fee_rate_sell: 0.00001
+    commission_assumption: true
+    sources:
+      stamp_duty: https://fgk.chinatax.gov.cn/zcfgk/c102416/c5211343/content.html
+      transfer_fee: http://www.chinaclear.cn/zdjs/tzgg/202204/1c36e55a9bd84c4bba4fcd269be26019.shtml
+notes: >-
+  Commission and minimum commission are engineering assumptions because broker
+  schedules differ. Stamp duty and transfer fee are effective-dated policy inputs.

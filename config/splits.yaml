@@ -1,0 +1,18 @@
+schema_version: 1
+policy_id: engineering_2024_h1_v1
+locked: true
+engineering_only: true
+train:
+  start: 2024-01-02
+  end: 2024-04-12
+validation:
+  start: 2024-04-15
+  end: 2024-06-12
+test:
+  start: 2024-06-17
+  end: 2024-06-28
+  locked: true
+  access: human_approval_only
+notes: >-
+  Short Phase 2 engineering split for the fixed survivorship-biased sample. The
+  baseline runner must not load, score, evaluate, or report the locked test range.

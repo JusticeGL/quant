@@ -12,6 +12,7 @@ from alpha_lab.database.catalog import (
     EXPECTED_TABLES,
     check_database,
     initialize_database,
+    record_baseline_run,
     sync_repository_metadata,
 )
 
@@ -176,3 +177,59 @@ def test_manifest_and_universe_sync_populates_catalog(tmp_path: Path) -> None:
     assert report["artifact_count"] == 2
     assert report["latest_snapshot_id"] == snapshot_id
     assert report["missing_artifact_files"] == []
+
+
+def test_baseline_run_registration_is_idempotent(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    database_path = data_root / "metadata.duckdb"
+    initialize_database(database_path)
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO meta.dataset_snapshot
+                (snapshot_id, snapshot_type, status, identity_sha256,
+                 schema_version)
+            VALUES ('p1-baseline-test', 'market', 'valid', ?, 1)
+            """,
+            ["a" * 64],
+        )
+
+    output_dir = tmp_path / "artifacts" / "baseline" / "run-test"
+    output_dir.mkdir(parents=True)
+    for name in (
+        "predictions.parquet",
+        "backtest_daily.parquet",
+        "trades.parquet",
+        "lightgbm_model.txt",
+        "baseline_report.md",
+        "baseline_report.html",
+    ):
+        (output_dir / name).write_text(name, encoding="utf-8")
+    manifest = {
+        "run_id": "run-test",
+        "data_snapshot_id": "p1-baseline-test",
+        "git": {"commit": "b" * 40},
+        "signal_analysis": {"mean_ic": 0.1, "daily": []},
+        "backtest": {"metrics": {"total_return": 0.02}, "constraints": {}},
+    }
+    manifest_path = output_dir / "run_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    record_baseline_run(database_path, ROOT / "config", data_root, manifest_path)
+    record_baseline_run(database_path, ROOT / "config", data_root, manifest_path)
+
+    with duckdb.connect(str(database_path), read_only=True) as connection:
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM research.experiment_run),
+                (SELECT count(*) FROM research.backtest_run),
+                (SELECT count(*) FROM research.experiment_metric),
+                (SELECT count(*) FROM policy.policy_version),
+                (SELECT count(*) FROM policy.cost_rule),
+                (SELECT count(*) FROM meta.artifact)
+            """
+        ).fetchone()
+
+    assert counts == (1, 1, 2, 2, 2, 7)
