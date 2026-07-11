@@ -1,17 +1,32 @@
 # A-Share Alpha Lab
 
-这是 A 股自动因子研究平台的 Phase 0 骨架。当前阶段只建立可复现的 Linux Python 运行环境、依赖锁、最小导入检查、质量检查和基础 CI；不包含数据下载、因子、评价、回测或交易连接。
+这是 A 股自动因子研究平台的 Phase 1 最小数据闭环。项目在 Linux
+Python 3.11 容器中以 AKShare 为主源获取固定小样本，保存不可变 raw 缓存，生成标准
+Parquet、质量报告、确定性快照清单和 Qlib 文件存储。规格书列出的 Baostock 只在
+AKShare 失败时作为显式备用源。
 
-## 运行边界
+当前没有 Alpha158、模型训练、因子评价、回测或交易账户连接；这些属于后续阶段。
 
-- 唯一正式 Python 环境：Docker Desktop 中的 Linux Python 3.11。
-- Apple Silicon 默认使用 Docker 原生 `linux/arm64`；项目没有设置 `linux/amd64` 覆盖。
-- `uv` 在容器内解析、锁定和安装依赖；主机 Python/uv 不作为验收环境。
-- `.env`、数据、缓存、本地数据库、模型和实验大文件均被 Git 与 Docker build context 排除。
+## 研究边界
 
-## Phase 0 命令
+- 固定工程样本为 10 只流动性较高的沪深 A 股，时间为 `2024-01-01` 至
+  `2024-06-30`。
+- 该名单是当前风格的人工工程样本，存在明确的生存者偏差，`research_eligible` 为
+  `false`。它只能验证数据工程，不能支持收益、因子或历史股票池结论。
+- 默认使用 AKShare `stock_zh_a_hist` 的不复权日线。Phase 1 不推断复权因子、涨跌停、
+  上市或退市状态；AKShare 行的停牌与 ST 状态也保持缺失。备用源实际提供的停牌和 ST
+  状态会保留，并由逐列缺失率反映覆盖差异。
+- 不下载全量 A 股数据，不运行回测，不读取券商凭据，也不连接任何交易账户。
 
-需要 Docker Desktop 正在运行。首次使用按顺序执行：
+## 正式运行环境
+
+- 所有正式 Python 命令均通过 `make` 或 `docker compose` 在 Linux 容器中执行。
+- 容器固定 Python 3.11，依赖由容器内 `uv` 解析并锁定在 `uv.lock`。
+- Apple Silicon 默认使用原生 ARM64；Compose 没有 `linux/amd64` 覆盖。
+- `.env`、`data/`、Parquet、Qlib 二进制、缓存、模型和实验大文件均不会进入 Git 或
+  Docker build context。
+
+首次运行：
 
 ```bash
 make lock
@@ -21,47 +36,126 @@ make lint
 make test
 ```
 
-常用入口：
+`pyqlib==0.9.7` 没有可用的 Linux ARM64 PyPI 分发，因此项目锁定 Microsoft/Qlib
+官方 `v0.9.7` commit `da920b7f954f48ab1bb64117c976710de198373e` 源码。
+这仍是原生 ARM64 构建，不是 amd64 模拟。
 
-- `make lock`：在临时 Linux Python 3.11 locker 容器内更新 `uv.lock`。
-- `make build`：构建安装锁定依赖的 research 镜像。
-- `make smoke`：真实导入 Qlib、AKShare、DuckDB、PyArrow 和 LightGBM，并打印 Linux、CPU 架构、Python 与包版本。
-- `make lint`：运行 Ruff 检查、Ruff 格式检查和 mypy。
-- `make test`：运行 pytest。
-- `make shell`：进入一次性 research 容器。
+## Phase 1 命令
 
-依赖发生变化后，先运行 `make lock`，再重新构建。`uv.lock` 是可复现环境的一部分，应提交 Git；锁文件只能由容器内的 `uv` 生成。
-
-## 进入 Phase 1 前的就绪检查
-
-Phase 1 仍使用小样本，但会开始产生不可提交的数据和缓存。开始前在项目根目录执行：
+Docker Desktop 必须处于运行状态。
 
 ```bash
-git lfs version
-git lfs install --local
-git lfs fsck
-gh auth status
-docker system df
-df -h .
-make lock build smoke lint test
+# 下载固定范围；已有的完整 raw 请求区间直接命中缓存
+make data-bootstrap
+
+# 重复执行应显示 network_requests: 0
+make data-bootstrap
+
+# 可选：仅抓取当前缓存尚未覆盖的尾段
+make data-update END_DATE=2024-07-31
+
+# 对最新快照重新计算质量检查
+make data-validate
+
+# 从同一个 silver 快照生成 Qlib 文件存储
+make qlib-export
+
+# 初始化 DuckDB 目录并同步当前 manifest
+make db-init
+
+# 只读验证 schema、逻辑外键和 artifact 文件
+make db-check
 ```
 
-- Git LFS 只作为仓库工具前置条件；`data/`、Parquet、DuckDB、模型与实验大文件继续完全排除在 Git 外，不应因为安装 LFS 而开始跟踪它们。
-- `gh auth status` 用于读取 GitHub Actions 结果，不替代 Git 的 SSH 认证。本仓库在端口 22 受限的网络中使用 SSH-over-443 remote。
-- 开始下载样本前必须查看主机和 Docker 可用空间。只清理能够确认归属的项目镜像或 cache，不运行会影响其他项目的无差别全局 prune。
-- 最后一条命令必须全部通过；它同时验证锁文件、Linux 镜像、ARM64/Python 版本、真实依赖导入、静态检查和测试。
+也可以显式选择快照：
 
-## 本机假设与已知风险
+```bash
+make data-validate SNAPSHOT=p1-<snapshot-id>
+make qlib-export SNAPSHOT=p1-<snapshot-id>
+```
 
-- 当前开发主机是 Apple Silicon，Docker daemon 报告 `linux/arm64`，因此不需要架构模拟。
-- Qlib、AKShare 及其上游依赖会变化；锁文件能固定已解析版本，但不能保证外部数据接口长期稳定。
-- PyPI 的 `pyqlib==0.9.7` 没有 Linux ARM64 wheel 或源码包，因此 Phase 0 按规格回退到 Microsoft/Qlib 官方 `v0.9.7` commit `da920b7f954f48ab1bb64117c976710de198373e` 源码安装；`uv.lock` 继续固定完整来源。
-- ARM64 若缺少 wheel，容器可能从源码编译；Dockerfile 提供了 C/C++、CMake、pkg-config、OpenMP 与 HDF5 构建依赖。不要未经诊断切换 amd64。
-- 完整依赖集较大，在约 8 GB 内存的 Docker Desktop 上首次构建会较慢；若失败，应先查看具体构建步骤与 OOM/磁盘信息。
-- Dockerfile 先安装锁定的第三方依赖，再复制 README 和项目源码；日常文档/代码修改会复用依赖层，避免反复产生约 2.35 GB 的完整环境层。
-- 当前开发机已安装 Git LFS，并在本仓库完成 local 初始化；其他开发机或全新 clone 仍须执行上述初始化。任何全量数据仍不得进入 Git。
-- 本机 Docker 使用配置过的 registry mirror/proxy，并报告非默认 seccomp profile；它们属于本机运维配置，不写入项目。
+`data-update` 不覆盖 raw 文件。若日期范围扩大，下载器扫描已有请求区间，只请求未覆盖的
+连续日期段，并把新响应追加为独立 raw artifact。AKShare 请求使用 15 秒超时、有限重试
+和请求间隔；上游失败后再次运行会从已完成标的继续。若主源最终失败，当前快照的全部
+标的统一改用 Baostock，避免在一个快照内混合不同来源口径；CLI 输出
+`selected_provider` 与 fallback 原因，manifest 的每个 raw input 记录实际 provider 和
+endpoint。Baostock 使用不需要凭据的公共数据会话，不是券商或交易账户连接。
 
-## 明确不在 Phase 0 的内容
+## 数据产物
 
-本阶段不会创建未来目录的空壳，不下载全量或样本行情，不实现 Qlib 数据导出、Alpha158、因子评价、回测、自动挖掘，也不会读取 Token 或连接交易账户。后续阶段必须由单独任务明确启动。
+所有产物均位于被 Git 忽略的根目录 `data/`：
+
+```text
+data/
+├── raw/akshare/stock_zh_a_hist/<symbol>/
+│   ├── <request-sha256>.parquet
+│   └── <request-sha256>.json
+├── raw/baostock/query_history_k_data_plus/<symbol>/
+│   ├── <request-sha256>.parquet
+│   └── <request-sha256>.json
+├── bronze/<snapshot-id>/daily.parquet
+├── silver/<snapshot-id>/daily.parquet
+├── manifests/<snapshot-id>/
+│   ├── manifest.json
+│   └── quality_report.json
+├── qlib/<snapshot-id>/
+│   ├── calendars/day.txt
+│   ├── instruments/all.txt
+│   ├── features/<instrument>/*.day.bin
+│   └── export_manifest.json
+└── state/latest_snapshot.txt
+```
+
+raw Parquet 保存数据源原始列；同目录 JSON 保存 provider、endpoint、请求参数、抓取
+时间、数据源包版本、行数和文件 SHA256。缓存读取前会重新校验 SHA256，任何不完整或
+被修改的 raw artifact 都会停止流水线。
+
+快照 ID 只由标准化 schema 版本、数据源配置、样本配置和 raw SHA256 决定，不包含运行
+时间或主机绝对路径。同一快照的 manifest 和 Qlib 内容哈希因此可以重复验证。
+
+当前 bronze 与 silver 使用相同的 Phase 1 标准表。silver 尚未补齐复权和时点状态，不能
+视为研究级数据。详细字段见 [Phase 1 数据字典](docs/data_dictionary.md)。
+
+## DuckDB 数据目录
+
+`data/metadata.duckdb` 已作为新数据库目录实现。它不重复保存大行情，而是管理版本迁移、
+数据源、证券主数据、不可变 artifact、数据快照、质量结果、时点规则和研究摘要；行情、
+财务、因子和回测明细继续使用 Parquet。DuckDB 通过类型化 table macro 直接读取固定
+Parquet 文件。
+
+初始 schema 包含 `meta/ref/market/fundamental/policy/research` 六个域、34 张基础表和
+8 个外部数据集契约。完整设计见 [数据库设计](docs/database_design.md)。数据库文件本身
+属于可再生本地状态，继续由 Git 忽略。
+
+## 质量门槛
+
+`quality_report.json` 至少记录：
+
+- 行数、标的数和日期范围；
+- 每列缺失率及完全缺失的状态字段；
+- 配置中存在但数据完全缺失的标的；
+- `(trade_date, instrument)` 重复键；
+- OHLC 关系错误、负成交量和负成交额；
+- 以样本联合交易日为基准的逐标的缺失日期。
+
+重复键、非法行情、核心数值缺失或整只标的缺失会得到 `error` 并使命令失败。仅 Phase 1
+状态字段缺失时为 `warning`，不会被悄悄解释成“未停牌”“非 ST”或“没有涨跌停”。
+
+## Qlib 导出
+
+导出器从固定 silver Parquet 读取，不访问网络。它生成 Qlib 官方文件存储约定：逐行日历、
+无表头标的区间和以全局日历索引开头的 little-endian `float32` 特征文件。当前只导出
+`open/high/low/close/volume/amount` 六个未复权基础字段。
+
+导出先写临时目录并计算逐文件 SHA256。相同快照已有导出时，只有内容哈希完全一致才视为
+成功；不同内容不会静默覆盖。集成测试会用真实 `qlib.init` 和 `D.features` 读取结果。
+
+## 已知风险
+
+- AKShare 的 Eastmoney 上游可能限流、主动断连或改变字段；锁文件不能固定外部接口。
+- 免费当前样本无法消除生存者偏差；历史动态股票池、退市股和状态数据属于 Phase 5。
+- 标准表把 AKShare 的“手”成交量乘以 100 转成股；Baostock 成交量已经是股。成交额保留
+  数据源原值。研究使用前仍需做抽样交叉核验。
+- ARM64 依赖失败时先保留错误并诊断。项目不会自动切到 `linux/amd64`。备用端点只有在
+  字段可等价标准化时才启用，且来源不会被伪装成 AKShare。
+- Phase 1 的 Qlib 产物只用于接口和可复现性验证，不应直接进入模型训练或回测。

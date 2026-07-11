@@ -23,9 +23,9 @@ htmlcov/
 *.swp
 
 # Research data, caches, model artifacts, and local databases
-data/
-artifacts/
-mlruns/
+/data/
+/artifacts/
+/mlruns/
 *.parquet
 *.feather
 *.arrow

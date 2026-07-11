@@ -8,9 +8,9 @@
 **/.pytest_cache
 **/.mypy_cache
 **/.ruff_cache
-data
-experiments
-artifacts
-mlruns
+/data
+/experiments
+/artifacts
+/mlruns
 *.duckdb
 *.parquet

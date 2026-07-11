@@ -5,7 +5,7 @@ services:
     build:
       context: .
       target: locker
-    image: a-share-alpha-lab-locker:phase0
+    image: a-share-alpha-lab-locker:phase1
     working_dir: /workspace
     volumes:
       - .:/workspace
@@ -14,7 +14,7 @@ services:
     build:
       context: .
       target: research
-    image: a-share-alpha-lab:phase0
+    image: a-share-alpha-lab:phase1
     init: true
     working_dir: /workspace
     environment:

@@ -1,0 +1,28 @@
+sample_id: liquid_a_share_engineering_sample_10
+as_of: 2026-07-10
+membership_basis: manually_selected_liquid_a_shares
+research_eligible: false
+disclaimer: >-
+  This fixed current-style engineering sample is survivorship-biased and must not
+  be used to make research or performance claims.
+symbols:
+  - code: "600519"
+    name: 贵州茅台
+  - code: "601318"
+    name: 中国平安
+  - code: "600036"
+    name: 招商银行
+  - code: "600276"
+    name: 恒瑞医药
+  - code: "600900"
+    name: 长江电力
+  - code: "000001"
+    name: 平安银行
+  - code: "000333"
+    name: 美的集团
+  - code: "000651"
+    name: 格力电器
+  - code: "000858"
+    name: 五粮液
+  - code: "002415"
+    name: 海康威视

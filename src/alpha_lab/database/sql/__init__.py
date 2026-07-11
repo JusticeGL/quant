@@ -1,0 +1,1 @@
+"""Versioned DuckDB schema migrations."""

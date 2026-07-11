@@ -12,6 +12,8 @@
 - Never modify files under `data/raw`; raw data is immutable and append-only.
 - Never commit `.env`, tokens, credentials, data files, caches, model artifacts, or large experiment outputs.
 - Keep dependency changes in `pyproject.toml` and regenerate the committed `uv.lock` inside the Linux container with `make lock`.
+- Keep large facts in immutable Parquet; DuckDB stores catalog and relational metadata, not a duplicate market-data body.
+- Never edit an applied database migration. Add a new numbered migration and preserve the recorded SHA256.
 - Treat `config/splits.yaml`, evaluation code, cost rules, leakage tests, and data manifests as locked areas. Propose changes for human review instead of editing them during factor mining.
 
 ## Research integrity
