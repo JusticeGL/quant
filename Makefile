@@ -5,7 +5,7 @@ CONFIG_DIR ?= config
 DATA_DIR ?= data
 DATA_END_DATE_ARG = $(if $(END_DATE),--end-date $(END_DATE),)
 
-.PHONY: build shell lock smoke lint test data-bootstrap data-update data-validate qlib-export db-init db-check baseline
+.PHONY: build shell lock smoke lint test data-bootstrap data-update data-validate qlib-export db-init db-check baseline factor-list factor-eval
 
 build:
 	$(COMPOSE) build $(RESEARCH_SERVICE)
@@ -36,6 +36,12 @@ db-check:
 
 baseline:
 	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli baseline --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR) $(if $(SNAPSHOT),--snapshot $(SNAPSHOT),)
+
+factor-list:
+	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli factor-list --config-dir $(CONFIG_DIR)
+
+factor-eval:
+	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli factor-eval --id $(ID) --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR) $(if $(SNAPSHOT),--snapshot $(SNAPSHOT),)
 
 smoke:
 	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.smoke

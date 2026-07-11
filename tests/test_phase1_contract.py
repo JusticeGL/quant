@@ -19,10 +19,10 @@ def test_makefile_exposes_database_targets() -> None:
         assert f"\n{target}:" in makefile
 
 
-def test_phase1_does_not_create_later_phase_modules() -> None:
+def test_project_does_not_create_backtest_or_mining_top_level_modules() -> None:
     package = ROOT / "src" / "alpha_lab"
 
-    for later_phase in ("backtest", "evaluation", "factors", "mining"):
+    for later_phase in ("backtest", "mining"):
         assert not (package / later_phase).exists()
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import duckdb
@@ -13,6 +14,7 @@ from alpha_lab.database.catalog import (
     check_database,
     initialize_database,
     record_baseline_run,
+    record_factor_evaluation,
     sync_repository_metadata,
 )
 
@@ -233,3 +235,77 @@ def test_baseline_run_registration_is_idempotent(tmp_path: Path) -> None:
         ).fetchone()
 
     assert counts == (1, 1, 2, 2, 2, 7)
+
+
+def test_factor_evaluation_registration_is_idempotent(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    database_path = data_root / "metadata.duckdb"
+    initialize_database(database_path)
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO meta.dataset_snapshot
+                (snapshot_id, snapshot_type, status, identity_sha256,
+                 schema_version)
+            VALUES ('p1-factor-test', 'market', 'valid', ?, 1)
+            """,
+            ["c" * 64],
+        )
+
+    output_dir = tmp_path / "artifacts" / "factors" / "factor-f0001-test"
+    output_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [{"trade_date": pd.Timestamp("2024-01-02"), "instrument": "A", "value": 1.0}]
+    ).to_parquet(output_dir / "factor_values.parquet", index=False)
+    result = {
+        "run_id": "factor-f0001-test",
+        "factor": {
+            "factor_id": "F0001",
+            "name": "momentum_20d",
+            "family": "momentum",
+            "hypothesis": "A sufficiently long test hypothesis.",
+            "formula": "close / Ref(close, 20) - 1",
+            "lookback": 21,
+            "direction": 1,
+        },
+        "factor_source_sha256": "d" * 64,
+        "factor_metadata_sha256": "e" * 64,
+        "implementation_path": "src/alpha_lab/factors/candidates/F0001.py",
+        "evaluation_policy_id": "phase3-test-policy",
+        "evaluation_config_sha256": "f" * 64,
+        "data_snapshot_id": "p1-factor-test",
+        "split_policy_sha256": "1" * 64,
+        "cost_policy_sha256": "2" * 64,
+        "git": {"commit": "3" * 40},
+        "metrics": {"valid_row_count": 1, "coverage": 1.0},
+        "eligible_for_review": False,
+        "leakage": {"passed": True},
+        "correlations": {"F0002": 0.2},
+        "topk_cost_sensitivity": {
+            "scenarios": {"base": {"metrics": {"total_return": 0.01}}}
+        },
+    }
+    result_path = output_dir / "factor_result.json"
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+
+    def record(_: int) -> None:
+        record_factor_evaluation(database_path, ROOT / "config", data_root, result_path)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(record, range(2)))
+
+    with duckdb.connect(str(database_path), read_only=True) as connection:
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM research.factor_definition),
+                (SELECT count(*) FROM research.factor_version),
+                (SELECT count(*) FROM research.experiment_run),
+                (SELECT count(*) FROM research.backtest_run),
+                (SELECT count(*) FROM research.experiment_metric),
+                (SELECT count(*) FROM meta.artifact)
+            """
+        ).fetchone()
+
+    assert counts == (1, 1, 1, 1, 6, 2)

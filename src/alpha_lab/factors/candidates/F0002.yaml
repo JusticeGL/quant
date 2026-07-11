@@ -1,0 +1,12 @@
+factor_id: F0002
+name: reversal_5d
+hypothesis: 过去五个交易日的极端收益可能在短期发生均值回归
+formula: close / Ref(close, 5) - 1
+inputs: [close]
+lookback: 6
+direction: -1
+family: reversal
+author: human_reference
+parent_factor_ids: []
+created_at: "2026-07-11T00:00:00+08:00"
+status: reference

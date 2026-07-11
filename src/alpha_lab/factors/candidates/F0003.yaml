@@ -1,0 +1,12 @@
+factor_id: F0003
+name: volatility_20d
+hypothesis: 较低的近期实现波动率可能对应更稳定的短期横截面收益
+formula: Std(close / Ref(close, 1) - 1, 20)
+inputs: [close]
+lookback: 21
+direction: -1
+family: volatility
+author: human_reference
+parent_factor_ids: []
+created_at: "2026-07-11T00:00:00+08:00"
+status: reference

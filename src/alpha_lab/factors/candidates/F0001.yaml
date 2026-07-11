@@ -1,0 +1,12 @@
+factor_id: F0001
+name: momentum_20d
+hypothesis: 过去二十个交易日价格趋势可能在短期内延续
+formula: close / Ref(close, 20) - 1
+inputs: [close]
+lookback: 21
+direction: 1
+family: momentum
+author: human_reference
+parent_factor_ids: []
+created_at: "2026-07-11T00:00:00+08:00"
+status: reference

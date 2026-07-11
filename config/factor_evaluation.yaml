@@ -1,0 +1,21 @@
+schema_version: 1
+policy_id: phase3_engineering_factor_evaluation_v1
+locked: true
+engineering_only: true
+group_count: 5
+winsor_quantile_lower: 0.01
+winsor_quantile_upper: 0.99
+standardize: true
+annualization_days: 252
+thresholds:
+  minimum_coverage: 0.70
+  minimum_abs_rank_ic: 0.015
+  minimum_abs_icir: 0.20
+  minimum_direction_consistency: 0.50
+  maximum_abs_accepted_correlation: 0.80
+  require_leakage_pass: true
+  require_cost_sign_stability: true
+notes: >-
+  Fixed Phase 3 engineering policy. Industry and size exposure are reported as
+  unavailable until point-in-time fields exist. Do not tune this policy for an
+  individual candidate.

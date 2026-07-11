@@ -17,5 +17,7 @@ def test_cli_registers_data_database_and_baseline_commands() -> None:
         "db-init",
         "db-check",
         "baseline",
+        "factor-list",
+        "factor-eval",
     ):
         assert command in result.output

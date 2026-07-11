@@ -23,7 +23,6 @@ def test_test_split_is_locked_and_human_approval_only() -> None:
     assert splits["test"]["access"] == "human_approval_only"
 
 
-def test_phase2_does_not_create_factor_mining_modules() -> None:
+def test_project_does_not_create_automatic_mining_module() -> None:
     package = ROOT / "src" / "alpha_lab"
-    for later_phase in ("evaluation", "factors", "mining"):
-        assert not (package / later_phase).exists()
+    assert not (package / "mining").exists()

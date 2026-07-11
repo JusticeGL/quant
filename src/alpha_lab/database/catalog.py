@@ -4,6 +4,9 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from importlib import resources
@@ -728,7 +731,40 @@ def _sync_quality_results(
     return len(checks)
 
 
+@contextmanager
+def _catalog_write_lock(database_path: Path) -> Iterator[None]:
+    lock_path = database_path.with_suffix(f"{database_path.suffix}.lockdir")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + 60.0
+    while True:
+        try:
+            lock_path.mkdir()
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"timed out waiting for DuckDB catalog lock: {lock_path}"
+                ) from None
+            time.sleep(0.1)
+    try:
+        yield
+    finally:
+        lock_path.rmdir()
+
+
 def record_baseline_run(
+    database_path: Path,
+    config_dir: Path,
+    data_root: Path,
+    manifest_path: Path,
+) -> None:
+    with _catalog_write_lock(database_path):
+        _record_baseline_run_unlocked(
+            database_path, config_dir, data_root, manifest_path
+        )
+
+
+def _record_baseline_run_unlocked(
     database_path: Path,
     config_dir: Path,
     data_root: Path,
@@ -895,6 +931,182 @@ def record_baseline_run(
                     artifact_ids["trades.parquet"],
                     artifact_ids["baseline_report.html"],
                     _canonical_json(manifest["backtest"]),
+                ],
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
+
+
+def record_factor_evaluation(
+    database_path: Path,
+    config_dir: Path,
+    data_root: Path,
+    result_path: Path,
+) -> None:
+    with _catalog_write_lock(database_path):
+        _record_factor_evaluation_unlocked(
+            database_path, config_dir, data_root, result_path
+        )
+
+
+def _record_factor_evaluation_unlocked(
+    database_path: Path,
+    config_dir: Path,
+    data_root: Path,
+    result_path: Path,
+) -> None:
+    """Record a Phase 3 factor version, evaluation, and artifacts."""
+    sync_repository_metadata(database_path, config_dir, data_root)
+    phase1 = load_phase1_config(config_dir)
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    factor = result["factor"]
+    factor_id = str(factor["factor_id"])
+    run_id = str(result["run_id"])
+    version_id = f"{factor_id}-{str(result['factor_source_sha256'])[:20]}"
+
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            connection.execute(
+                """
+                INSERT INTO policy.policy_version
+                    (policy_id, policy_type, version, config_sha256, locked)
+                VALUES (?, 'factor_evaluation', '1', ?, true)
+                ON CONFLICT (policy_id) DO NOTHING
+                """,
+                [
+                    result["evaluation_policy_id"],
+                    result["evaluation_config_sha256"],
+                ],
+            )
+            connection.execute(
+                """
+                INSERT INTO research.factor_definition
+                    (factor_id, name, family, description)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (factor_id) DO NOTHING
+                """,
+                [
+                    factor_id,
+                    factor["name"],
+                    factor["family"],
+                    factor["hypothesis"],
+                ],
+            )
+            connection.execute(
+                """
+                INSERT INTO research.factor_version
+                    (factor_version_id, factor_id, formula,
+                     implementation_path, code_sha256, metadata_sha256,
+                     lookback, direction)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (factor_version_id) DO NOTHING
+                """,
+                [
+                    version_id,
+                    factor_id,
+                    factor["formula"],
+                    result["implementation_path"],
+                    result["factor_source_sha256"],
+                    result["factor_metadata_sha256"],
+                    factor["lookback"],
+                    factor["direction"],
+                ],
+            )
+            connection.execute(
+                """
+                INSERT INTO research.experiment_run
+                    (experiment_id, factor_version_id, data_snapshot_id,
+                     universe_id, split_policy_sha256, cost_policy_sha256,
+                     code_commit, status, started_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'success',
+                        current_timestamp, current_timestamp)
+                ON CONFLICT (experiment_id) DO NOTHING
+                """,
+                [
+                    run_id,
+                    version_id,
+                    result["data_snapshot_id"],
+                    phase1.universe.sample_id,
+                    result["split_policy_sha256"],
+                    result["cost_policy_sha256"],
+                    result["git"]["commit"],
+                ],
+            )
+
+            metrics = {
+                key: value
+                for key, value in result["metrics"].items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            }
+            metrics["eligible_for_review"] = float(result["eligible_for_review"])
+            metrics["leakage_passed"] = float(result["leakage"]["passed"])
+            base_metrics = result["topk_cost_sensitivity"]["scenarios"]["base"][
+                "metrics"
+            ]
+            for key, value in base_metrics.items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    metrics[f"topk_{key}"] = value
+            for key, value in result["correlations"].items():
+                if value is not None:
+                    metrics[f"correlation_{key}"] = value
+            for name, value in metrics.items():
+                connection.execute(
+                    """
+                    INSERT INTO research.experiment_metric
+                        (experiment_id, split_name, metric_name, metric_value)
+                    VALUES (?, 'validation', ?, ?)
+                    ON CONFLICT
+                        (experiment_id, split_name, metric_name, period)
+                    DO NOTHING
+                    """,
+                    [run_id, name, float(value)],
+                )
+
+            artifact_ids: dict[str, str] = {}
+            for name, dataset_name, artifact_format in (
+                ("factor_values.parquet", "factor.values", "parquet"),
+                ("factor_result.json", "factor.result", "json"),
+            ):
+                path = result_path.parent / name
+                relative_path = Path(
+                    os.path.relpath(path.resolve(), start=data_root.resolve())
+                ).as_posix()
+                artifact_ids[name] = _upsert_artifact(
+                    connection,
+                    data_root,
+                    layer="research" if name.endswith(".parquet") else "report",
+                    dataset_name=dataset_name,
+                    relative_path=relative_path,
+                    artifact_format=artifact_format,
+                    sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                    schema_version=1,
+                    source_id=None,
+                    row_count=(
+                        int(result["metrics"]["valid_row_count"])
+                        if name.endswith(".parquet")
+                        else None
+                    ),
+                    min_event_date=None,
+                    max_event_date=None,
+                )
+            connection.execute(
+                """
+                INSERT INTO research.backtest_run
+                    (backtest_id, experiment_id, data_snapshot_id,
+                     signal_artifact_id, report_artifact_id, status, summary)
+                VALUES (?, ?, ?, ?, ?, 'success', ?)
+                ON CONFLICT (backtest_id) DO NOTHING
+                """,
+                [
+                    f"{run_id}-topk",
+                    run_id,
+                    result["data_snapshot_id"],
+                    artifact_ids["factor_values.parquet"],
+                    artifact_ids["factor_result.json"],
+                    _canonical_json(result["topk_cost_sensitivity"]),
                 ],
             )
             connection.execute("COMMIT")

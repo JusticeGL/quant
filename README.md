@@ -1,11 +1,11 @@
 # A-Share Alpha Lab
 
-这是 A 股自动因子研究平台的 Phase 2 可复现基线。项目在 Linux Python 3.11 容器中
+这是 A 股自动因子研究平台的 Phase 3 自定义因子评价环境。项目在 Linux Python 3.11 容器中
 完成 Phase 1 的不可变数据闭环，并使用 Qlib Alpha158、确定性 LightGBM、validation
-信号分析和 Top-K 组合回测生成 Markdown/HTML 报告。规格书列出的 Baostock 只在
-AKShare 失败时作为显式备用源。
+信号分析和 Top-K 组合回测生成 Phase 2 基线；Phase 3 增加严格因子契约、注册表、固定
+评价程序和防泄漏门禁。规格书列出的 Baostock 只在 AKShare 失败时作为显式备用源。
 
-当前不包含自定义因子评价、自动因子挖掘、锁定测试集评价或交易账户连接；这些属于
+当前不包含自动因子挖掘、自动接受/拒绝决策、锁定测试集评价或交易账户连接；这些属于
 后续阶段。
 
 ## 研究边界
@@ -100,6 +100,37 @@ baseline_report.html
 相同 run ID 再次执行时必须得到相同 `reproducibility_sha256`，否则命令失败且不会覆盖
 旧产物。成功运行会把政策版本、实验、指标、artifact 和回测摘要登记到
 `data/metadata.duckdb`。详细协议见 [Phase 2 基线说明](docs/phase2_baseline.md)。
+
+## Phase 3 因子评价
+
+```bash
+# 查看注册的参考/候选因子
+make factor-list
+
+# 使用固定评价政策评价一个因子
+make factor-eval ID=F0001
+make factor-eval ID=F0002
+make factor-eval ID=F0003
+```
+
+每个因子必须同时提供 `src/alpha_lab/factors/candidates/<ID>.py` 和 `<ID>.yaml`。
+实现只能读取元数据声明字段，必须输出 `(trade_date, instrument, value)`，不得访问网络、
+写文件、读取标签、使用负向 shift 或未来窗口。统一评价在因子外执行截面去极值、方向
+调整和标准化。
+
+泄漏门禁包括：
+
+- AST 静态扫描负向 shift、居中窗口、未声明字段、网络和文件 I/O；
+- 完整历史与截断历史的前缀不变性；
+- 扰动未来输入后历史因子值不变；
+- 输出键、重复值、无穷值和输入突变检查。
+
+`factor_result.json` 固定输出覆盖率、IC/RankIC/ICIR、月度/年度/滚动稳定性、五分组
+收益、单调性、Top-minus-Bottom、因子换手、注册因子相关性、缺失/极值、Top-K 回测和
+零/基础/双倍成本敏感性。行业和市值字段尚不存在时明确输出 `unavailable`。
+
+评价通过门槛只得到 `eligible_for_review=true`，不会自动接受。完整协议见
+[Phase 3 因子评价说明](docs/phase3_factor_evaluation.md)。
 
 也可以显式选择快照：
 

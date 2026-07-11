@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 from typing import Annotated, Any
 
+import duckdb
 import pandas as pd
 import typer
 
@@ -18,6 +19,8 @@ from alpha_lab.database.catalog import (
     initialize_database,
     sync_repository_metadata,
 )
+from alpha_lab.evaluation.pipeline import evaluate_factor
+from alpha_lab.factors.registry import FactorRegistry
 
 app = typer.Typer(
     add_completion=False,
@@ -204,6 +207,75 @@ def baseline(
             "markdown_report": str(result.markdown_report_path),
             "html_report": str(result.html_report_path),
             "reproducibility_sha256": result.reproducibility_sha256,
+        }
+    )
+
+
+@app.command("factor-list")
+def factor_list(
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+) -> None:
+    """List registered Phase 3 factor candidates and their audit status."""
+    registry = FactorRegistry(
+        Path(__file__).parent / "factors" / "candidates",
+        config_dir / "factor_registry.yaml",
+    )
+    _render(
+        {
+            "factors": [
+                {
+                    "factor_id": item.metadata.factor_id,
+                    "name": item.metadata.name,
+                    "family": item.metadata.family,
+                    "status": item.metadata.status,
+                    "source_sha256": item.source_sha256,
+                    "metadata_sha256": item.metadata_sha256,
+                }
+                for item in registry.all()
+            ],
+            "accepted_factor_ids": sorted(registry.accepted_factor_ids),
+        }
+    )
+
+
+@app.command("factor-eval")
+def factor_eval(
+    factor_id: Annotated[str, typer.Option("--id", help="Registered factor ID.")],
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    output_dir: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "artifacts/factors"
+    ),
+    snapshot: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Run the locked Phase 3 structured evaluation for one factor."""
+    try:
+        result = evaluate_factor(
+            factor_id,
+            config_dir,
+            data_dir,
+            output_dir,
+            snapshot_id=snapshot,
+        )
+    except (
+        duckdb.Error,
+        KeyError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as error:
+        typer.echo(f"factor evaluation failed: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    _render(
+        {
+            "factor_id": result.factor_id,
+            "run_id": result.run_id,
+            "output": str(result.output_dir),
+            "factor_result": str(result.result_path),
+            "factor_values": str(result.values_path),
+            "result_sha256": result.result_sha256,
+            "eligible_for_review": result.eligible_for_review,
         }
     )
 

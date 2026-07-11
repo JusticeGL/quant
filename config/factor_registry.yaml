@@ -1,0 +1,7 @@
+schema_version: 1
+reference_factor_ids: [F0001, F0002, F0003]
+accepted_factor_ids: []
+rejected_factor_ids: []
+notes: >-
+  Phase 3 hand-written reference factors. Reference status does not mean accepted
+  for research or production use.
