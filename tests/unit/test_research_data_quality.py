@@ -112,6 +112,19 @@ def test_delisted_security_is_retained_and_nullable_status_is_warning() -> None:
     assert report["checks"]["nullable_status"]["count"] == 2
 
 
+def test_missing_delist_date_is_reported_as_warning() -> None:
+    tables = _tables()
+    tables.security_master.loc[0, "delist_date"] = pd.NaT
+
+    report = build_research_quality_report(
+        tables, load_research_data_config(ROOT / "config")
+    )
+
+    assert report["status"] == "warning"
+    assert report["summary"]["delisted_security_count"] == 1
+    assert report["checks"]["missing_delist_date"]["count"] == 1
+
+
 def test_nonpositive_adjustment_factor_is_error() -> None:
     tables = _tables()
     tables.adjustment_factor.loc[0, "adj_factor"] = 0.0

@@ -26,13 +26,20 @@ def normalize_security_master(raw: pd.DataFrame, *, ingested_at: str) -> pd.Data
         "name",
         "market",
         "exchange",
-        "curr_type",
         "list_status",
         "list_date",
-        "delist_date",
     )
     _require_columns(raw, required, "stock_basic")
-    frame = raw.loc[:, list(required)].copy()
+    eligible = (
+        raw["ts_code"].astype("string").str.fullmatch(r"[0-9]{6}\.(SH|SZ|BJ)", na=False)
+    )
+    excluded_count = int((~eligible).sum())
+    selected = raw.loc[eligible].copy()
+    frame = selected.loc[:, list(required)].copy()
+    currency = selected.get("curr_type", pd.Series("CNY", index=selected.index))
+    delist_date = selected.get("delist_date", pd.Series(pd.NA, index=selected.index))
+    frame["curr_type"] = currency.replace("", pd.NA).fillna("CNY")
+    frame["delist_date"] = delist_date
     frame.insert(0, "security_id", frame["ts_code"].map(to_security_id))
     frame["list_date"] = _date_series(frame["list_date"], required=True)
     frame["delist_date"] = _date_series(frame["delist_date"], required=False)
@@ -49,7 +56,9 @@ def normalize_security_master(raw: pd.DataFrame, *, ingested_at: str) -> pd.Data
     invalid = frame["delist_date"].notna() & (frame["delist_date"] < frame["list_date"])
     if invalid.any():
         raise ValueError("delist_date must be on or after list_date")
-    return frame.sort_values("security_id", kind="stable").reset_index(drop=True)
+    result = frame.sort_values("security_id", kind="stable").reset_index(drop=True)
+    result.attrs["excluded_non_a_share_count"] = excluded_count
+    return result
 
 
 def normalize_name_history(raw: pd.DataFrame) -> pd.DataFrame:
@@ -234,36 +243,24 @@ def normalize_adjustment_factors(raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def normalize_suspensions(raw: pd.DataFrame) -> pd.DataFrame:
-    common_required = (
-        "ts_code",
-        "suspend_date",
-        "resume_date",
-        "ann_date",
-        "suspend_reason",
-    )
-    _require_columns(raw, common_required, "suspend_d")
-    type_field = "suspend_type" if "suspend_type" in raw.columns else "reason_type"
-    _require_columns(raw, (type_field,), "suspend_d")
+    required = ("ts_code", "trade_date", "suspend_timing", "suspend_type")
+    _require_columns(raw, required, "suspend_d")
+    trade_date = _date_series(raw["trade_date"], required=True)
     frame = pd.DataFrame(
         {
             "security_id": raw["ts_code"].map(to_security_id),
-            "effective_from": _date_series(raw["suspend_date"], required=True),
+            "effective_from": trade_date,
+            "effective_to": trade_date,
+            "resume_date": pd.NaT,
         }
     )
-    resume = _date_series(raw["resume_date"], required=False)
-    frame["resume_date"] = resume
-    frame["effective_to"] = resume.map(
-        lambda value: value - timedelta(days=1) if pd.notna(value) else pd.NaT
+    frame["announced_at"] = pd.Series(
+        pd.NaT, index=frame.index, dtype="datetime64[ns, UTC]"
     )
-    announcement = _date_series(raw["ann_date"], required=False)
-    known_date = announcement.fillna(frame["effective_from"])
-    frame["announced_at"] = _utc_date(announcement)
-    frame["known_at"] = _utc_date(known_date)
-    frame["known_at_source"] = np.where(
-        announcement.notna(), "announcement_date", "effective_date_fallback"
-    )
-    frame["suspend_type"] = raw[type_field].astype("string")
-    frame["suspend_reason"] = raw["suspend_reason"].astype("string")
+    frame["known_at"] = _utc_date(trade_date)
+    frame["known_at_source"] = "effective_date_fallback"
+    frame["suspend_type"] = raw["suspend_type"].astype("string")
+    frame["suspend_reason"] = raw["suspend_timing"].astype("string")
     frame["source"] = "tushare.suspend_d"
     _validate_interval_order(frame, "suspension")
     return frame.sort_values(

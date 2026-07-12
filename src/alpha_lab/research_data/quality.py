@@ -64,6 +64,14 @@ def build_research_quality_report(
         for column in ("is_suspended", "is_st")
         if column in tables.daily_status.columns
     )
+    list_status = tables.security_master.get(
+        "list_status", pd.Series(dtype="string")
+    ).astype("string")
+    delist_date = tables.security_master.get(
+        "delist_date", pd.Series(pd.NaT, index=tables.security_master.index)
+    )
+    delisted = list_status.eq("D")
+    missing_delist_date = int((delisted & delist_date.isna()).sum())
     checks: dict[str, dict[str, object]] = {
         "duplicate_keys": _check("error", duplicate_count),
         "membership_overlap": _check("error", membership_overlap),
@@ -73,6 +81,7 @@ def build_research_quality_report(
         "membership_lifecycle_violation": _check("error", lifecycle_violations),
         "invalid_adjustment_factor": _check("error", invalid_adjustment),
         "nullable_status": _check("warning", nullable_status),
+        "missing_delist_date": _check("warning", missing_delist_date),
     }
     has_error = any(
         item["severity"] == "error" and item["count"] != 0 for item in checks.values()
@@ -81,9 +90,6 @@ def build_research_quality_report(
         item["severity"] == "warning" and item["count"] != 0 for item in checks.values()
     )
     status = "error" if has_error else "warning" if has_warning else "pass"
-    delisted = tables.security_master.get(
-        "delist_date", pd.Series(dtype="datetime64[ns]")
-    )
     return {
         "schema_version": 1,
         "policy": "phase5_point_in_time_quality_v1",
@@ -95,7 +101,7 @@ def build_research_quality_report(
         },
         "summary": {
             "security_count": len(tables.security_master),
-            "delisted_security_count": int(delisted.notna().sum()),
+            "delisted_security_count": int(delisted.sum()),
             "membership_interval_count": len(tables.index_membership),
             "daily_bar_count": len(tables.daily_bar),
             "adjustment_factor_count": len(tables.adjustment_factor),

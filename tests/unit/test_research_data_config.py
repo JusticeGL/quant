@@ -23,6 +23,7 @@ def test_repository_research_data_config_is_bounded() -> None:
     assert config.end_date == date(2026, 7, 11)
     assert config.membership_method == "interval_or_weight_observation"
     assert config.source.provider == "tushare"
+    assert config.source.maximum_concurrency == 4
 
 
 def test_config_rejects_inverted_range() -> None:

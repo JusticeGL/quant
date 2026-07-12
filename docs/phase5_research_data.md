@@ -30,9 +30,14 @@ list_date <= D <= delist_date（空退市日视为未退市）
 ```
 
 成分接口提供公告日时使用公告日作为 `known_at`；缺失时保守使用生效日并标记
-`effective_date_fallback`。历史名称只在其有效区间内产生 ST 状态。停牌事件按公告日和
-停复牌区间展开；完整查询确认没有事件时才标记 `is_suspended=false`。缺失名称覆盖保持
-nullable，不使用当前名称回填。
+`effective_date_fallback`。历史名称只在其有效区间内产生 ST 状态。`suspend_d` 的每日
+停牌记录按交易日保存为单日事件；完整查询确认没有事件时才标记
+`is_suspended=false`。缺失名称覆盖保持 nullable，不使用当前名称回填。
+
+部分兼容端点不返回 `curr_type` 和 `delist_date`。A 股币种在这种情况下明确回填为 CNY；
+退市证券的未知退市日期保持 NULL，并由 `missing_delist_date` 质量 warning 披露，不推断或
+伪造日期。非六位数字 A 股标识在证券主档入口排除，若历史指数成员引用被排除标识，外键
+质量门禁仍会阻止快照发布。
 
 日线价格保持未复权。Tushare 成交量从手转换为股，成交额从千元转换为元。复权因子单独
 保存，必须为有限正数；信号计算需要调整价格时应从固定快照派生，不覆盖日线事实。
@@ -47,7 +52,8 @@ data/raw/tushare/<api_name>/<request_sha256>.json
 ```
 
 重复请求先校验 sidecar 与 Parquet SHA256，再直接命中缓存。网络或权限错误后重跑会复用
-已完成请求。研究快照位于 `data/research/p5-*/`，大事实按年分区；manifest 与质量报告在
+已完成请求。逐证券下载最多使用 4 个并发 worker，结果仍按证券代码确定性归并。研究快照
+位于 `data/research/p5-*/`，大事实按年分区；manifest 与质量报告在
 `data/manifests/p5-*/`。只有所有质量门禁通过后才更新
 `data/state/latest_research_snapshot.txt`。
 

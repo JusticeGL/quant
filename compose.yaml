@@ -30,7 +30,7 @@ services:
     build:
       context: .
       target: research
-    image: a-share-alpha-lab:phase3
+    image: a-share-alpha-lab:phase5
     init: true
     working_dir: /workspace
     environment:

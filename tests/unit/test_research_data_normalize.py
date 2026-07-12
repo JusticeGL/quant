@@ -40,6 +40,57 @@ def test_security_master_keeps_delisted_security() -> None:
     assert result.loc[0, "known_at"] == pd.Timestamp("2026-07-11", tz="UTC")
 
 
+def test_security_master_marks_proxy_optional_fields_as_unknown() -> None:
+    raw = pd.DataFrame(
+        [
+            {
+                "ts_code": "600001.SH",
+                "symbol": "600001",
+                "name": "示例退市",
+                "market": "主板",
+                "exchange": "SSE",
+                "list_status": "D",
+                "list_date": "20000101",
+            }
+        ]
+    )
+
+    result = normalize_security_master(raw, ingested_at="2026-07-11T00:00:00Z")
+
+    assert result.loc[0, "currency"] == "CNY"
+    assert pd.isna(result.loc[0, "delist_date"])
+
+
+def test_security_master_excludes_non_a_share_identifiers() -> None:
+    raw = pd.DataFrame(
+        [
+            {
+                "ts_code": "600001.SH",
+                "symbol": "600001",
+                "name": "示例股份",
+                "market": "主板",
+                "exchange": "SSE",
+                "list_status": "L",
+                "list_date": "20000101",
+            },
+            {
+                "ts_code": "TS0018.SH",
+                "symbol": "TS0018",
+                "name": "上港集箱(退)",
+                "market": "主板",
+                "exchange": "SSE",
+                "list_status": "D",
+                "list_date": "20000719",
+            },
+        ]
+    )
+
+    result = normalize_security_master(raw, ingested_at="2026-07-11T00:00:00Z")
+
+    assert result["ts_code"].tolist() == ["600001.SH"]
+    assert result.attrs["excluded_non_a_share_count"] == 1
+
+
 def test_name_history_derives_st_only_inside_effective_interval() -> None:
     raw = pd.DataFrame(
         [
@@ -190,25 +241,25 @@ def test_adjustment_factor_must_be_positive() -> None:
         normalize_adjustment_factors(raw)
 
 
-def test_suspension_known_at_never_precedes_announcement() -> None:
+def test_daily_suspension_is_normalized_as_one_day_event() -> None:
     raw = pd.DataFrame(
         [
             {
                 "ts_code": "600001.SH",
-                "suspend_date": "20210105",
-                "resume_date": "20210108",
-                "ann_date": "20210104",
-                "suspend_type": "盘中停牌",
-                "suspend_reason": "重大事项",
+                "trade_date": "20210105",
+                "suspend_timing": "09:30-15:00",
+                "suspend_type": "S",
             }
         ]
     )
 
     result = normalize_suspensions(raw)
 
-    assert result.loc[0, "known_at"] == pd.Timestamp("2021-01-04", tz="UTC")
+    assert result.loc[0, "known_at"] == pd.Timestamp("2021-01-05", tz="UTC")
     assert result.loc[0, "effective_from"] == pd.Timestamp("2021-01-05")
-    assert result.loc[0, "effective_to"] == pd.Timestamp("2021-01-07")
+    assert result.loc[0, "effective_to"] == pd.Timestamp("2021-01-05")
+    assert result.loc[0, "suspend_type"] == "S"
+    assert result.loc[0, "suspend_reason"] == "09:30-15:00"
 
 
 def test_security_id_rejects_unknown_exchange() -> None:

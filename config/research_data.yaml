@@ -9,6 +9,7 @@ calendar_exchange: SSE
 maximum_symbols: 1000
 source:
   provider: tushare
+  maximum_concurrency: 4
   request_timeout_seconds: 30
   max_attempts: 3
   retry_delay_seconds: 2

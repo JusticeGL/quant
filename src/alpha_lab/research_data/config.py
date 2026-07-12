@@ -14,6 +14,7 @@ class StrictModel(BaseModel):
 
 class TushareSourceConfig(StrictModel):
     provider: Literal["tushare"]
+    maximum_concurrency: int = Field(default=1, ge=1, le=4)
     request_timeout_seconds: float = Field(gt=0, le=120)
     max_attempts: int = Field(ge=1, le=10)
     retry_delay_seconds: float = Field(ge=0, le=60)

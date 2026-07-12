@@ -184,15 +184,21 @@ class TushareProvider:
             raise TushareProviderError(f"Tushare {api_name} response has no data")
         returned_fields = data.get("fields")
         items = data.get("items")
-        if returned_fields != list(requested_fields):
+        if (
+            not isinstance(returned_fields, list)
+            or not all(isinstance(field, str) for field in returned_fields)
+            or len(returned_fields) != len(set(returned_fields))
+            or not set(requested_fields).issubset(returned_fields)
+        ):
             raise TushareProviderError(
                 f"Tushare {api_name} returned fields {returned_fields!r}; "
-                f"expected {list(requested_fields)!r}"
+                f"required {list(requested_fields)!r}"
             )
         if not isinstance(items, list):
             raise TushareProviderError(f"Tushare {api_name} items must be a list")
         try:
-            return pd.DataFrame(items, columns=list(requested_fields))
+            frame = pd.DataFrame(items, columns=returned_fields)
+            return frame.loc[:, list(requested_fields)]
         except (TypeError, ValueError) as error:
             raise TushareProviderError(
                 f"Tushare {api_name} row shape does not match returned fields"

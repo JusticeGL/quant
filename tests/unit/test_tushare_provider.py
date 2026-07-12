@@ -160,6 +160,37 @@ def test_returned_fields_must_match_request(tmp_path: Path) -> None:
         provider.query("stock_basic", {"list_status": "L"}, ("ts_code", "name"))
 
 
+def test_extra_returned_fields_are_ignored(tmp_path: Path) -> None:
+    transport = FakeTransport(
+        [
+            {
+                "code": 0,
+                "msg": None,
+                "data": {
+                    "fields": ["ts_code", "name", "unused"],
+                    "items": [["600000.SH", "浦发银行", "extra"]],
+                },
+            }
+        ]
+    )
+    provider = TushareProvider(
+        tmp_path,
+        _source(),
+        token="secret",
+        http_url="https://example.test",
+        transport=transport,
+        sleep=lambda _: None,
+    )
+
+    result = provider.query("stock_basic", {"list_status": "L"}, ("ts_code", "name"))
+
+    assert result.frame.columns.tolist() == ["ts_code", "name"]
+    assert result.frame.iloc[0].to_dict() == {
+        "ts_code": "600000.SH",
+        "name": "浦发银行",
+    }
+
+
 def test_token_and_https_endpoint_are_required(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="TUSHARE_TOKEN"):
         TushareProvider(

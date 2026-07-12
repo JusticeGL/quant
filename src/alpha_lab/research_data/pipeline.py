@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -41,10 +42,8 @@ STOCK_BASIC_FIELDS = (
     "name",
     "market",
     "exchange",
-    "curr_type",
     "list_status",
     "list_date",
-    "delist_date",
 )
 CALENDAR_FIELDS = ("exchange", "cal_date", "is_open", "pretrade_date")
 MEMBERSHIP_FIELDS = (
@@ -70,11 +69,9 @@ DAILY_FIELDS = (
 ADJUSTMENT_FIELDS = ("ts_code", "trade_date", "adj_factor")
 SUSPENSION_FIELDS = (
     "ts_code",
-    "suspend_date",
-    "resume_date",
-    "ann_date",
-    "suspend_reason",
-    "reason_type",
+    "trade_date",
+    "suspend_timing",
+    "suspend_type",
 )
 NAME_FIELDS = (
     "ts_code",
@@ -263,38 +260,23 @@ def run_research_data_pipeline(
         "start_date": config.start_date.strftime("%Y%m%d"),
         "end_date": config.end_date.strftime("%Y%m%d"),
     }
-    for ts_code in member_codes:
-        daily_result = active.query(
-            config.endpoints.daily_bar,
-            {"ts_code": ts_code, **date_params},
-            DAILY_FIELDS,
+    worker_count = min(config.source.maximum_concurrency, len(member_codes))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        symbol_results = executor.map(
+            lambda ts_code: _query_security_history(
+                active, config, ts_code, date_params
+            ),
+            member_codes,
         )
-        adjustment_result = active.query(
-            config.endpoints.adjustment_factor,
-            {"ts_code": ts_code, **date_params},
-            ADJUSTMENT_FIELDS,
-        )
-        suspension_result = active.query(
-            config.endpoints.suspension,
-            {"ts_code": ts_code, **date_params},
-            SUSPENSION_FIELDS,
-        )
-        name_result = active.query(
-            config.endpoints.name_history,
-            {"ts_code": ts_code, **date_params},
-            NAME_FIELDS,
-        )
-        selected = (
-            daily_result,
-            adjustment_result,
-            suspension_result,
-            name_result,
-        )
-        results.extend(selected)
-        daily_parts.append(normalize_daily_bars(daily_result.frame))
-        adjustment_parts.append(normalize_adjustment_factors(adjustment_result.frame))
-        suspension_parts.append(normalize_suspensions(suspension_result.frame))
-        name_parts.append(normalize_name_history(name_result.frame))
+        for selected in symbol_results:
+            daily_result, adjustment_result, suspension_result, name_result = selected
+            results.extend(selected)
+            daily_parts.append(normalize_daily_bars(daily_result.frame))
+            adjustment_parts.append(
+                normalize_adjustment_factors(adjustment_result.frame)
+            )
+            suspension_parts.append(normalize_suspensions(suspension_result.frame))
+            name_parts.append(normalize_name_history(name_result.frame))
 
     daily_bar = pd.concat(daily_parts, ignore_index=True)
     adjustment_factor = pd.concat(adjustment_parts, ignore_index=True)
@@ -320,6 +302,26 @@ def run_research_data_pipeline(
         raw_artifact_count=len(artifacts),
         historical_symbol_count=len(member_codes),
         membership_method=membership_method,
+    )
+
+
+def _query_security_history(
+    provider: QueryProvider,
+    config: ResearchDataConfig,
+    ts_code: str,
+    date_params: dict[str, str],
+) -> tuple[
+    TushareQueryResult,
+    TushareQueryResult,
+    TushareQueryResult,
+    TushareQueryResult,
+]:
+    params = {"ts_code": ts_code, **date_params}
+    return (
+        provider.query(config.endpoints.daily_bar, params, DAILY_FIELDS),
+        provider.query(config.endpoints.adjustment_factor, params, ADJUSTMENT_FIELDS),
+        provider.query(config.endpoints.suspension, params, SUSPENSION_FIELDS),
+        provider.query(config.endpoints.name_history, params, NAME_FIELDS),
     )
 
 

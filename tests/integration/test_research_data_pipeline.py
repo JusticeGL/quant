@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -162,6 +164,25 @@ class FixtureProvider:
         return pd.DataFrame(rows, columns=list(fields))
 
 
+class ConcurrentFixtureProvider(FixtureProvider):
+    def __init__(self, data_root: Path) -> None:
+        super().__init__(data_root)
+        self.symbol_thread_ids: set[int] = set()
+        self.thread_lock = threading.Lock()
+
+    def query(
+        self,
+        api_name: str,
+        params: dict[str, object],
+        fields: tuple[str, ...],
+    ) -> TushareQueryResult:
+        if api_name in {"daily", "adj_factor", "suspend_d", "namechange"}:
+            with self.thread_lock:
+                self.symbol_thread_ids.add(threading.get_ident())
+            time.sleep(0.02)
+        return super().query(api_name, params, fields)
+
+
 def test_pipeline_queries_only_historical_member_union(tmp_path: Path) -> None:
     provider = FixtureProvider(tmp_path)
 
@@ -202,3 +223,11 @@ def test_pipeline_does_not_publish_without_membership_capability(
         run_research_data_pipeline(ROOT / "config", tmp_path, provider=provider)
 
     assert not list((tmp_path / "manifests").glob("p5-*/manifest.json"))
+
+
+def test_pipeline_loads_symbols_with_bounded_concurrency(tmp_path: Path) -> None:
+    provider = ConcurrentFixtureProvider(tmp_path)
+
+    run_research_data_pipeline(ROOT / "config", tmp_path, provider=provider)
+
+    assert len(provider.symbol_thread_ids) == 2
