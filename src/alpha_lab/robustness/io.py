@@ -9,6 +9,8 @@ from typing import Any
 
 import pandas as pd
 
+from alpha_lab.data.normalize import to_qlib_instrument
+
 LOCKED_TEST_START = date(2026, 1, 1)
 _MARKET_DATASETS = ("daily_bar", "adjustment_factor", "daily_status")
 
@@ -223,21 +225,34 @@ def _verified_artifact_path(
 def _read_partition_set(paths: list[Path], end_before: date) -> pd.DataFrame:
     if not paths:
         return pd.DataFrame()
-    frame = pd.concat([pd.read_parquet(path) for path in paths], ignore_index=True)
-    _require_columns(frame, {"trade_date", "security_id"}, "dated snapshot")
+    parts: list[pd.DataFrame] = []
+    for path in paths:
+        part = pd.read_parquet(path)
+        _require_columns(
+            part, {"trade_date", "security_id", "known_at"}, "dated snapshot"
+        )
+        if part["known_at"].isna().any():
+            raise ValueError(f"dated snapshot known_at contains nulls: {path.name}")
+        try:
+            part["known_at"] = pd.to_datetime(
+                part["known_at"], errors="raise", utc=True
+            )
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"dated snapshot known_at is invalid: {path.name}"
+            ) from error
+        parts.append(part)
+    frame = pd.concat(parts, ignore_index=True)
     frame["trade_date"] = pd.to_datetime(
         frame["trade_date"], errors="raise"
     ).dt.normalize()
+    known_at = frame["known_at"]
     bounded = frame.loc[
         (frame["trade_date"].dt.date < end_before)
         & (frame["trade_date"].dt.date < LOCKED_TEST_START)
+        & (known_at < pd.Timestamp(end_before, tz="UTC"))
+        & (known_at < pd.Timestamp(LOCKED_TEST_START, tz="UTC"))
     ].copy()
-    if "known_at" in bounded:
-        known_at = pd.to_datetime(bounded["known_at"], errors="raise", utc=True)
-        bounded = bounded.loc[
-            (known_at < pd.Timestamp(end_before, tz="UTC"))
-            & (known_at < pd.Timestamp(LOCKED_TEST_START, tz="UTC"))
-        ].copy()
     return bounded.sort_values(
         ["trade_date", "security_id"], kind="stable"
     ).reset_index(drop=True)
@@ -329,12 +344,16 @@ def _market_contract(
 
 def _to_instrument(security_id: object) -> str:
     parts = str(security_id).split(":")
-    if len(parts) != 3 or parts[0] != "CN" or not parts[2].isdigit():
+    if len(parts) != 3 or parts[0] != "CN":
         raise ValueError(f"unsupported security ID: {security_id}")
-    prefix = {"SSE": "SH", "SZSE": "SZ", "BSE": "BJ"}.get(parts[1])
-    if prefix is None:
+    expected_prefix = {"SSE": "SH", "SZSE": "SZ", "BSE": "BJ"}.get(parts[1])
+    try:
+        instrument = to_qlib_instrument(parts[2])
+    except ValueError as error:
+        raise ValueError(f"unsupported security ID: {security_id}") from error
+    if expected_prefix is None or not instrument.startswith(expected_prefix):
         raise ValueError(f"unsupported security ID: {security_id}")
-    return f"{prefix}{parts[2]}"
+    return instrument
 
 
 def _require_columns(frame: pd.DataFrame, required: set[str], label: str) -> None:

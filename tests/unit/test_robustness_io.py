@@ -11,6 +11,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
+from alpha_lab.robustness import io as robustness_io
 from alpha_lab.robustness.io import read_pretest_exposures, read_pretest_market
 
 LOCKED_START = date(2026, 1, 1)
@@ -203,6 +204,37 @@ def test_pretest_market_rejects_canonical_path_symlinked_to_locked_partition(
         read_pretest_market(tmp_path, snapshot_id, date(2025, 12, 31))
 
 
+@pytest.mark.parametrize(
+    "dataset", ["daily_bar", "adjustment_factor", "daily_status", "market_cap"]
+)
+@pytest.mark.parametrize("bad_known_at", ["missing", None, "not-a-timestamp"])
+def test_each_dated_dataset_requires_parseable_non_null_known_at(
+    tmp_path: Path,
+    dataset: str,
+    bad_known_at: object,
+) -> None:
+    reader, snapshot_id = _dated_snapshot_with_known_at(tmp_path, dataset, bad_known_at)
+
+    with pytest.raises(ValueError, match="known_at"):
+        reader(tmp_path, snapshot_id, date(2025, 12, 31))
+
+
+@pytest.mark.parametrize(
+    "security_id",
+    [
+        "CN:SSE:1",
+        "CN:SSE:000001",
+        "CN:SZSE:600000",
+        "CN:BSE:600000",
+    ],
+)
+def test_market_adapter_rejects_noncanonical_exchange_or_code(
+    security_id: str,
+) -> None:
+    with pytest.raises(ValueError, match="unsupported security ID"):
+        robustness_io._to_instrument(security_id)
+
+
 def test_pretest_exposures_skip_locked_market_cap_and_bound_membership(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -321,6 +353,58 @@ def _membership(known_at: str, *, industry_id: str = "SW:bank") -> dict[str, obj
         "known_at": pd.Timestamp(known_at),
         "provenance": "fixture",
     }
+
+
+def _dated_snapshot_with_known_at(
+    data_dir: Path,
+    target_dataset: str,
+    bad_known_at: object,
+) -> tuple[Any, str]:
+    frames = {
+        "daily_bar": pd.DataFrame([_bar("2025-12-30")]),
+        "adjustment_factor": pd.DataFrame([_adjustment("2025-12-30")]),
+        "daily_status": pd.DataFrame([_status("2025-12-30")]),
+        "market_cap": pd.DataFrame([_market_cap("2025-12-30")]),
+    }
+    target = frames[target_dataset]
+    if bad_known_at == "missing":
+        frames[target_dataset] = target.drop(columns="known_at")
+    else:
+        frames[target_dataset]["known_at"] = target["known_at"].astype(object)
+        frames[target_dataset].loc[0, "known_at"] = bad_known_at
+    if target_dataset == "market_cap":
+        snapshot_id = "p6x-fixture"
+        artifacts = [
+            _parquet_artifact(
+                data_dir,
+                snapshot_id,
+                "market_cap/year=2025/part.parquet",
+                frames["market_cap"],
+                root="exposures",
+            ),
+            _parquet_artifact(
+                data_dir,
+                snapshot_id,
+                "industry_membership.parquet",
+                pd.DataFrame([_membership("2025-01-01T00:00:00Z")]),
+                root="exposures",
+            ),
+        ]
+        _write_manifest(data_dir, snapshot_id, "point_in_time_exposure", artifacts)
+        return read_pretest_exposures, snapshot_id
+    snapshot_id = "p5-fixture"
+    artifacts = [
+        _parquet_artifact(
+            data_dir,
+            snapshot_id,
+            f"{dataset}/year=2025/part.parquet",
+            frames[dataset],
+            root="research",
+        )
+        for dataset in ("daily_bar", "adjustment_factor", "daily_status")
+    ]
+    _write_manifest(data_dir, snapshot_id, "research_market", artifacts)
+    return read_pretest_market, snapshot_id
 
 
 def _parquet_artifact(
