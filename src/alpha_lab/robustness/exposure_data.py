@@ -63,6 +63,8 @@ def normalize_market_cap(
 ) -> pd.DataFrame:
     _require_fields(raw, DAILY_BASIC_FIELDS, "daily_basic")
     _reject_row_limit(raw, row_limit, "daily_basic")
+    if expected_ts_code is not None and raw.empty:
+        raise ValueError(f"daily_basic returned empty response for {expected_ts_code}")
     if (
         expected_ts_code is not None
         and not raw["ts_code"].astype(str).eq(expected_ts_code).all()
@@ -131,6 +133,10 @@ def normalize_industry_membership(
 ) -> pd.DataFrame:
     _require_fields(raw, INDUSTRY_MEMBER_FIELDS, "index_member_all")
     _reject_row_limit(raw, row_limit, "index_member_all")
+    if expected_l1_code is not None and raw.empty:
+        raise ValueError(
+            f"index_member_all returned empty response for {expected_l1_code}"
+        )
     if (
         expected_l1_code is not None
         and not raw["l1_code"].astype(str).eq(expected_l1_code).all()
@@ -189,8 +195,18 @@ def industry_as_of(intervals: pd.DataFrame, as_of: date) -> pd.DataFrame:
 
 
 def validate_exposure_tables(
-    tables: ExposureTables, known_security_ids: set[str]
+    tables: ExposureTables,
+    known_security_ids: set[str],
+    *,
+    expected_security_ids: set[str] | None = None,
+    expected_industry_ids: set[str] | None = None,
 ) -> dict[str, object]:
+    expected_security_ids = expected_security_ids or set(
+        tables.market_cap.attrs.get("expected_security_ids", [])
+    )
+    expected_industry_ids = expected_industry_ids or set(
+        tables.industry_membership.attrs.get("expected_industry_ids", [])
+    )
     duplicate_count = sum(
         int(frame.duplicated(keys).sum())
         for frame, keys in (
@@ -224,6 +240,10 @@ def validate_exposure_tables(
         columns=["total_market_cap_cny", "float_market_cap_cny"]
     ).apply(pd.to_numeric, errors="coerce")
     invalid_cap = int((cap.isna() | ~np.isfinite(cap) | (cap <= 0)).sum().sum())
+    observed_security_ids = set(tables.market_cap.get("security_id", []))
+    observed_industry_ids = set(tables.industry_membership.get("industry_id", []))
+    missing_security_coverage = len(expected_security_ids - observed_security_ids)
+    missing_industry_coverage = len(expected_industry_ids - observed_industry_ids)
     checks = {
         "empty_required_table": _quality_check(
             sum(
@@ -240,6 +260,8 @@ def validate_exposure_tables(
         "unknown_security_reference": _quality_check(unknown_security),
         "unknown_industry_reference": _quality_check(unknown_industry),
         "invalid_market_cap": _quality_check(invalid_cap),
+        "missing_security_coverage": _quality_check(missing_security_coverage),
+        "missing_industry_coverage": _quality_check(missing_industry_coverage),
     }
     status = "error" if any(item["count"] for item in checks.values()) else "pass"
     return {
@@ -250,6 +272,8 @@ def validate_exposure_tables(
             "market_cap_count": len(tables.market_cap),
             "industry_definition_count": len(tables.industry_definition),
             "industry_membership_count": len(tables.industry_membership),
+            "expected_security_count": len(expected_security_ids),
+            "expected_industry_count": len(expected_industry_ids),
         },
         "checks": checks,
     }
@@ -274,14 +298,18 @@ def probe_exposure_capabilities(config_dir: Path, data_dir: Path) -> dict[str, o
         {"l1_code": first_industry},
         INDUSTRY_MEMBER_FIELDS,
     )
+    normalize_industry_membership(
+        member.frame,
+        set(normalized["source_index_code"].astype(str)),
+        expected_l1_code=first_industry,
+    )
     first_date = config.warmup.start.strftime("%Y%m%d")
     market = provider.query(
         config.exposure_source.endpoints.market_cap,
         {"ts_code": codes[0], "start_date": first_date, "end_date": first_date},
         DAILY_BASIC_FIELDS,
     )
-    _reject_row_limit(member.frame, INDUSTRY_MEMBER_ROW_LIMIT, "index_member_all")
-    _reject_row_limit(market.frame, DAILY_BASIC_ROW_LIMIT, "daily_basic")
+    normalize_market_cap(market.frame, expected_ts_code=codes[0])
     return {
         "provider": "tushare",
         "classification_standard": "SW2021",
@@ -321,13 +349,17 @@ def acquire_exposure_tables(
         {"l1_code": first_code},
         INDUSTRY_MEMBER_FIELDS,
     )
+    normalize_industry_membership(
+        probe_member.frame,
+        set(definitions["source_index_code"].astype(str)),
+        expected_l1_code=first_code,
+    )
     probe_market = provider.query(
         config.exposure_source.endpoints.market_cap,
         {"ts_code": ts_codes[0], "start_date": start, "end_date": start},
         DAILY_BASIC_FIELDS,
     )
-    _reject_row_limit(probe_member.frame, INDUSTRY_MEMBER_ROW_LIMIT, "index_member_all")
-    _reject_row_limit(probe_market.frame, DAILY_BASIC_ROW_LIMIT, "daily_basic")
+    normalize_market_cap(probe_market.frame, expected_ts_code=ts_codes[0])
 
     worker_count = min(config.exposure_source.maximum_concurrency, len(ts_codes))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -370,9 +402,21 @@ def acquire_exposure_tables(
         ],
         ignore_index=True,
     )
+    expected_security_ids = {to_security_id(code) for code in ts_codes}
+    expected_industry_ids = {f"CN:SW2021:{code}" for code in industry_codes}
+    market.attrs["expected_security_ids"] = sorted(expected_security_ids)
+    membership.attrs["expected_industry_ids"] = sorted(expected_industry_ids)
     if _interval_overlap_count(membership):
         raise ValueError("industry membership intervals overlap")
     tables = ExposureTables(market, definitions, membership)
+    quality = validate_exposure_tables(
+        tables,
+        set(phase5["security"]["security_id"].astype(str)),
+        expected_security_ids=expected_security_ids,
+        expected_industry_ids=expected_industry_ids,
+    )
+    if quality["status"] == "error":
+        raise ValueError("exposure acquisition coverage gates failed")
     artifacts = _unique_artifacts(
         [definition_result, probe_market, *market_results, *member_results]
     )

@@ -108,6 +108,78 @@ def test_validation_requires_matching_quality_report(tmp_path: Path) -> None:
     assert "missing:quality_report" in validation["failures"]
 
 
+@pytest.mark.parametrize(
+    ("target", "expected_failure"),
+    [
+        ("manifest", "phase5_manifest_sha256"),
+        ("security_master.parquet", "phase5:sha256:security_master.parquet"),
+        ("index_membership.parquet", "phase5:sha256:index_membership.parquet"),
+    ],
+)
+def test_validation_rejects_post_publication_phase5_tampering(
+    tmp_path: Path, target: str, expected_failure: str
+) -> None:
+    result = _materialize_fixture(tmp_path)
+    phase5_path = tmp_path / "manifests" / "p5-ecaa6e8aeae6b9f8fb25" / "manifest.json"
+    if target == "manifest":
+        phase5_path.write_bytes(phase5_path.read_bytes() + b" ")
+    else:
+        phase5 = json.loads(phase5_path.read_text(encoding="utf-8"))
+        artifact = next(item for item in phase5["artifacts"] if item["name"] == target)
+        path = tmp_path / artifact["path"]
+        path.write_bytes(b"tampered")
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert expected_failure in validation["failures"]
+
+
+def test_validation_rejects_substituted_quality_document(tmp_path: Path) -> None:
+    result = _materialize_fixture(tmp_path)
+    _replace_quality(result.manifest_path, tmp_path, {"status": "pass"})
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_schema" in validation["failures"]
+    assert "identity_sha256" in validation["failures"]
+
+
+def test_validation_rejects_internally_inconsistent_quality_check(
+    tmp_path: Path,
+) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    quality_path = tmp_path / manifest["quality_report"]["path"]
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    quality["checks"]["duplicate_keys"] = {
+        "severity": "error",
+        "status": "pass",
+        "count": 1,
+    }
+    _replace_quality(result.manifest_path, tmp_path, quality)
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_checks" in validation["failures"]
+
+
+def test_validation_rejects_quality_row_count_mismatch(tmp_path: Path) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    quality_path = tmp_path / manifest["quality_report"]["path"]
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    quality["summary"]["market_cap_count"] = 999
+    _replace_quality(result.manifest_path, tmp_path, quality)
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_row_counts" in validation["failures"]
+
+
 def _materialize_fixture(tmp_path: Path):
     phase5_manifest = _phase5_fixture(tmp_path)
     config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
@@ -175,7 +247,9 @@ def _phase5_fixture(tmp_path: Path) -> Path:
     research = tmp_path / "research" / "p5-ecaa6e8aeae6b9f8fb25"
     research.mkdir(parents=True)
     security = research / "security_master.parquet"
+    membership = research / "index_membership.parquet"
     pd.DataFrame([{"security_id": "CN:SSE:600000"}]).to_parquet(security, index=False)
+    pd.DataFrame([{"security_id": "CN:SSE:600000"}]).to_parquet(membership, index=False)
     manifest_dir = tmp_path / "manifests" / "p5-ecaa6e8aeae6b9f8fb25"
     manifest_dir.mkdir(parents=True)
     manifest = {
@@ -183,11 +257,12 @@ def _phase5_fixture(tmp_path: Path) -> Path:
         "snapshot_type": "research_market",
         "artifacts": [
             {
-                "name": "security_master.parquet",
-                "path": security.relative_to(tmp_path).as_posix(),
-                "sha256": hashlib.sha256(security.read_bytes()).hexdigest(),
+                "name": artifact.name,
+                "path": artifact.relative_to(tmp_path).as_posix(),
+                "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 "row_count": 1,
             }
+            for artifact in (security, membership)
         ],
     }
     path = manifest_dir / "manifest.json"
@@ -211,4 +286,18 @@ def _raw_input(tmp_path: Path) -> TushareArtifact:
         params={},
         fields=("fixture",),
         ingested_at="2026-07-13T00:00:00Z",
+    )
+
+
+def _replace_quality(manifest_path: Path, data_dir: Path, quality: object) -> None:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    quality_path = data_dir / manifest["quality_report"]["path"]
+    quality_path.write_text(
+        json.dumps(quality, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    manifest["quality_report"]["sha256"] = hashlib.sha256(
+        quality_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8"
     )
