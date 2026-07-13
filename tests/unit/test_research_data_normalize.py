@@ -123,6 +123,63 @@ def test_name_history_derives_st_only_inside_effective_interval() -> None:
     assert result.loc[0, "effective_from"] == pd.Timestamp("2021-01-05")
 
 
+def test_name_history_collapses_revised_duplicate_intervals() -> None:
+    raw = pd.DataFrame(
+        [
+            {
+                "ts_code": "600001.SH",
+                "name": "*ST示例",
+                "start_date": "20210105",
+                "end_date": "",
+                "ann_date": "20210104",
+                "change_reason": "其他",
+            },
+            {
+                "ts_code": "600001.SH",
+                "name": "*ST示例",
+                "start_date": "20210105",
+                "end_date": "20210630",
+                "ann_date": "20210104",
+                "change_reason": "*ST",
+            },
+        ]
+    )
+
+    result = normalize_name_history(raw)
+
+    assert len(result) == 1
+    assert result.loc[0, "effective_to"] == pd.Timestamp("2021-06-30")
+    assert result.loc[0, "change_reason"] == "*ST"
+
+
+def test_name_history_keeps_latest_open_revision_for_same_announcement() -> None:
+    raw = pd.DataFrame(
+        [
+            {
+                "ts_code": "000961.SZ",
+                "name": "ST中南",
+                "start_date": "20240423",
+                "end_date": "",
+                "ann_date": "20240423",
+                "change_reason": "ST",
+            },
+            {
+                "ts_code": "000961.SZ",
+                "name": "ST中南",
+                "start_date": "20240424",
+                "end_date": "",
+                "ann_date": "20240423",
+                "change_reason": "ST",
+            },
+        ]
+    )
+
+    result = normalize_name_history(raw)
+
+    assert len(result) == 1
+    assert result.loc[0, "effective_from"] == pd.Timestamp("2024-04-24")
+
+
 def test_membership_uses_announcement_or_conservative_effective_date() -> None:
     raw = pd.DataFrame(
         [

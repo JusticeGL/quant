@@ -8,6 +8,7 @@ import duckdb
 import pandas as pd
 
 from alpha_lab.database.catalog import (
+    _sync_research_securities,
     initialize_database,
     sync_research_snapshot,
 )
@@ -150,3 +151,49 @@ def test_research_snapshot_sync_is_idempotent(tmp_path: Path) -> None:
         ).fetchone()
 
     assert counts == (1, 1, 1, 1, 1, 1, 3)
+
+
+def test_security_sync_uses_bounded_bulk_statements() -> None:
+    class RecordingConnection:
+        def __init__(self) -> None:
+            self.statements: list[str] = []
+            self.registered: list[str] = []
+
+        def register(self, name: str, frame: pd.DataFrame) -> None:
+            self.registered.append(name)
+
+        def unregister(self, name: str) -> None:
+            pass
+
+        def execute(self, statement: str) -> RecordingConnection:
+            self.statements.append(statement)
+            return self
+
+    frame = pd.DataFrame(
+        [
+            {
+                "security_id": f"CN:SSE:{code}",
+                "ts_code": f"{code}.SH",
+                "symbol": code,
+                "name": f"证券{code}",
+                "exchange": "SSE",
+                "board": "主板",
+                "currency": "CNY",
+                "list_status": "L",
+                "list_date": pd.Timestamp("2020-01-01"),
+                "delist_date": pd.NaT,
+                "known_at": pd.Timestamp("2020-01-01", tz="UTC"),
+            }
+            for code in ("600001", "600002")
+        ]
+    )
+    connection = RecordingConnection()
+
+    _sync_research_securities(connection, frame, "artifact-id")  # type: ignore[arg-type]
+
+    assert len(connection.statements) == 3
+    assert connection.registered == [
+        "phase5_security_batch",
+        "phase5_identifier_batch",
+        "phase5_lifecycle_batch",
+    ]

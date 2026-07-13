@@ -680,73 +680,103 @@ def _sync_research_securities(
         "P": "suspended_listing",
         "G": "prelisted",
     }
+    now = pd.Timestamp.now(tz="UTC")
+    security_records: list[dict[str, object]] = []
+    identifier_records: list[dict[str, object]] = []
+    lifecycle_records: list[dict[str, object]] = []
     for row in frame.to_dict("records"):
         security_id = str(row["security_id"])
-        connection.execute(
-            """
-            INSERT INTO ref.security
-                (security_id, asset_type, exchange, board, currency, lot_size)
-            VALUES (?, 'stock', ?, ?, ?, 100)
-            ON CONFLICT (security_id) DO NOTHING
-            """,
-            [
-                security_id,
-                row["exchange"],
-                row.get("board"),
-                row.get("currency") or "CNY",
-            ],
+        known_at = row.get("known_at")
+        if known_at is None or pd.isna(known_at):
+            known_at = now
+        security_records.append(
+            {
+                "security_id": security_id,
+                "exchange": row["exchange"],
+                "board": row.get("board"),
+                "currency": row.get("currency") or "CNY",
+            }
         )
-        known_at = row.get("known_at") or pd.Timestamp.now(tz="UTC")
         for identifier_type, identifier_value in (
             ("tushare_code", row.get("ts_code")),
             ("symbol", row.get("symbol")),
             ("name", row.get("name")),
         ):
-            if identifier_value is None:
+            if identifier_value is None or pd.isna(identifier_value):
                 continue
-            identifier_id = hashlib.sha256(
-                f"{security_id}|{identifier_type}|{identifier_value}|{row['list_date']}".encode()
-            ).hexdigest()
-            connection.execute(
-                """
-                INSERT INTO ref.security_identifier_history
-                    (identifier_id, security_id, identifier_type, identifier_value,
-                     valid_from, known_at, source_artifact_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (identifier_id) DO NOTHING
-                """,
-                [
-                    identifier_id,
-                    security_id,
-                    identifier_type,
-                    str(identifier_value),
-                    row["list_date"],
-                    known_at,
-                    source_artifact_id,
-                ],
+            identifier_records.append(
+                {
+                    "identifier_id": hashlib.sha256(
+                        f"{security_id}|{identifier_type}|{identifier_value}|{row['list_date']}".encode()
+                    ).hexdigest(),
+                    "security_id": security_id,
+                    "identifier_type": identifier_type,
+                    "identifier_value": str(identifier_value),
+                    "valid_from": row["list_date"],
+                    "known_at": known_at,
+                    "source_artifact_id": source_artifact_id,
+                }
             )
+        lifecycle_records.append(
+            {
+                "security_id": security_id,
+                "list_date": row["list_date"],
+                "delist_date": row.get("delist_date"),
+                "listing_status": listing_status.get(
+                    str(row.get("list_status")), "unknown"
+                ),
+                "known_at": known_at,
+                "source_artifact_id": source_artifact_id,
+            }
+        )
+
+    batches = {
+        "phase5_security_batch": pd.DataFrame(security_records),
+        "phase5_identifier_batch": pd.DataFrame(identifier_records),
+        "phase5_lifecycle_batch": pd.DataFrame(lifecycle_records),
+    }
+    for name, batch in batches.items():
+        connection.register(name, batch)
+    try:
+        connection.execute(
+            """
+            INSERT INTO ref.security
+                (security_id, asset_type, exchange, board, currency, lot_size)
+            SELECT security_id, 'stock', exchange, board, currency, 100
+            FROM phase5_security_batch
+            ON CONFLICT (security_id) DO NOTHING
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO ref.security_identifier_history
+                (identifier_id, security_id, identifier_type, identifier_value,
+                 valid_from, known_at, source_artifact_id)
+            SELECT identifier_id, security_id, identifier_type, identifier_value,
+                   valid_from, known_at, source_artifact_id
+            FROM phase5_identifier_batch
+            ON CONFLICT (identifier_id) DO NOTHING
+            """
+        )
         connection.execute(
             """
             INSERT INTO ref.security_lifecycle
                 (security_id, list_date, delist_date, listing_status,
                  known_at, source_artifact_id)
-            VALUES (?, ?, ?, ?, ?, ?)
+            SELECT security_id, list_date, delist_date, listing_status,
+                   known_at, source_artifact_id
+            FROM phase5_lifecycle_batch
             ON CONFLICT (security_id) DO UPDATE SET
                 list_date = excluded.list_date,
                 delist_date = excluded.delist_date,
                 listing_status = excluded.listing_status,
                 known_at = excluded.known_at,
                 source_artifact_id = excluded.source_artifact_id
-            """,
-            [
-                security_id,
-                row["list_date"],
-                row.get("delist_date"),
-                listing_status.get(str(row.get("list_status")), "unknown"),
-                known_at,
-                source_artifact_id,
-            ],
+            """
         )
+    finally:
+        for name in batches:
+            connection.unregister(name)
 
 
 def _sync_security_names(

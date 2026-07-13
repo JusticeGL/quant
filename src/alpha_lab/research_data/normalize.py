@@ -71,7 +71,34 @@ def normalize_name_history(raw: pd.DataFrame) -> pd.DataFrame:
         "change_reason",
     )
     _require_columns(raw, required, "namechange")
-    frame = raw.loc[:, list(required)].copy()
+    revisions = raw.loc[:, list(required)].copy()
+    revisions["_has_end"] = revisions["end_date"].replace("", pd.NA).notna()
+    revisions["_has_announcement"] = revisions["ann_date"].replace("", pd.NA).notna()
+    revisions["_specific_reason"] = revisions["change_reason"].ne("其他")
+    revisions = revisions.sort_values(
+        [
+            "ts_code",
+            "start_date",
+            "_has_end",
+            "_has_announcement",
+            "_specific_reason",
+            "end_date",
+            "change_reason",
+        ],
+        ascending=[True, True, False, False, False, False, True],
+        kind="stable",
+    ).drop_duplicates(["ts_code", "start_date"], keep="first")
+    open_mask = revisions["end_date"].replace("", pd.NA).isna()
+    open_revisions = revisions.loc[open_mask].sort_values(
+        "start_date", ascending=False, kind="stable"
+    )
+    open_revisions = open_revisions.drop_duplicates(
+        ["ts_code", "name", "ann_date", "change_reason"], keep="first"
+    )
+    revisions = pd.concat(
+        [revisions.loc[~open_mask], open_revisions], ignore_index=True
+    )
+    frame = revisions.loc[:, list(required)].copy()
     frame.insert(0, "security_id", frame.pop("ts_code").map(to_security_id))
     frame["effective_from"] = _date_series(frame.pop("start_date"), required=True)
     frame["effective_to"] = _date_series(frame.pop("end_date"), required=False)
