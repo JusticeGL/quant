@@ -59,3 +59,24 @@ Phase 5 位于 `data/research/<p5-snapshot-id>/`，与 Phase 1 silver 并行：
 
 `known_at` 晚于查询日期的记录不可见。上游缺少公告日时使用生效日作为保守 fallback，并在
 `known_at_source` 中明确记录。
+
+## Phase 6 暴露快照与审批目录
+
+Phase 6 暴露快照位于 `data/exposures/<p6x-snapshot-id>/`，清单位于
+`data/manifests/<p6x-snapshot-id>/manifest.json`。清单同时锁定 Phase 5
+清单、稳健性策略、质量报告、raw request 与每个 Parquet artifact 的
+SHA256。
+
+| 数据集/目录表 | 主键 | 时点字段 | 说明 |
+|---|---|---|---|
+| `market.exposure_market_cap` | `trade_date,security_id` | `known_at` | 总市值和流通市值，单位 CNY；按年保留在 Parquet，DuckDB 只登记 artifact |
+| `ref.industry_definition` | `definition_id` | 快照身份 | SW2021 行业定义；`definition_id` 是记录内容 SHA256，`exposure_snapshot_id,industry_id` 唯一 |
+| `ref.industry_membership_history` | `membership_id` | `effective_from,effective_to,known_at` | 证券行业区间；同时外键引用行业定义和 `ref.security` |
+| `research.factor_freeze` | `freeze_id` | `created_at` | 锁定因子版本、Phase 5/暴露快照、策略哈希、Git commit 与最终测试区间 |
+| `research.test_request` | `request_id` | `requested_at` | 指向一个 freeze 和稳健性报告 SHA256，状态固定为 `test_requested` |
+| `research.test_approval` | `approval_id` | `approved_at` | 实名审批人对 request 及精确 freeze SHA256 的批准 |
+| `research.final_test_run` | `test_run_id` | `started_at,finished_at` | 指向 approval/freeze 及不可变结果、报告 artifact SHA256 标识 |
+
+`effective_from <= D <= effective_to` 且 `known_at <= D` 时，行业成员记录才在
+日期 `D` 可见。`known_at_source=effective_date_fallback` 表示上游无公告日，
+使用生效日作为保守回退；禁止使用当前行业回填历史。

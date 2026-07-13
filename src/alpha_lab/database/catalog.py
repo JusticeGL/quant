@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import duckdb
 import pandas as pd
@@ -19,10 +19,11 @@ import pandas as pd
 from alpha_lab.data.config import load_phase1_config
 from alpha_lab.data.normalize import to_qlib_instrument
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MIGRATIONS = (
     (1, "initial_catalog", "001_initial.sql"),
     (2, "research_data", "002_research_data.sql"),
+    (3, "robustness_catalog", "003_robustness.sql"),
 )
 
 EXPECTED_TABLES = {
@@ -41,6 +42,8 @@ EXPECTED_TABLES = {
     "ref.security_identifier_history",
     "ref.security_lifecycle",
     "ref.security_name_history",
+    "ref.industry_definition",
+    "ref.industry_membership_history",
     "ref.trading_calendar",
     "ref.industry_classification",
     "ref.industry_node",
@@ -62,6 +65,10 @@ EXPECTED_TABLES = {
     "research.experiment_metric",
     "research.experiment_decision",
     "research.backtest_run",
+    "research.factor_freeze",
+    "research.test_request",
+    "research.test_approval",
+    "research.final_test_run",
 }
 
 DATASET_CONTRACTS: tuple[dict[str, Any], ...] = (
@@ -174,6 +181,25 @@ DATASET_CONTRACTS: tuple[dict[str, Any], ...] = (
         ],
         "point_in_time_column": "known_at",
         "description": "Daily valuation, shares, turnover, and market capitalization.",
+    },
+    {
+        "dataset_name": "market.exposure_market_cap",
+        "storage_layer": "research",
+        "primary_key_columns": ["trade_date", "security_id"],
+        "partition_columns": ["year"],
+        "required_columns": [
+            "trade_date",
+            "security_id",
+            "total_market_cap_cny",
+            "float_market_cap_cny",
+            "known_at",
+            "source",
+        ],
+        "point_in_time_column": "known_at",
+        "description": (
+            "Phase 6 point-in-time market-cap exposure facts; values remain "
+            "in immutable Parquet."
+        ),
     },
     {
         "dataset_name": "market.daily_status",
@@ -567,6 +593,371 @@ def sync_research_snapshot(
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+
+
+def sync_exposure_snapshot(
+    database_path: Path, data_dir: Path, manifest_path: Path
+) -> None:
+    """Synchronize one validated Phase 6 exposure snapshot into the catalog."""
+    manifest = _read_exposure_manifest(data_dir, manifest_path)
+    from alpha_lab.robustness.exposure_snapshot import validate_exposure_snapshot
+
+    validation = validate_exposure_snapshot(data_dir, str(manifest["snapshot_id"]))
+    if not validation["healthy"]:
+        raise ValueError(
+            f"invalid exposure snapshot: {_canonical_json(validation['failures'])}"
+        )
+    phase5_manifest_path = (
+        data_dir / "manifests" / str(manifest["phase5_snapshot_id"]) / "manifest.json"
+    )
+    phase5_manifest = json.loads(phase5_manifest_path.read_text(encoding="utf-8"))
+
+    with _catalog_write_lock(database_path):
+        initialize_database(database_path)
+        with duckdb.connect(str(database_path)) as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                _sync_research_manifest(connection, data_dir, phase5_manifest)
+                _sync_exposure_manifest(connection, data_dir, manifest, validation)
+                connection.execute(
+                    """
+                    INSERT INTO meta.repository_state (key, value)
+                    VALUES ('latest_exposure_snapshot_id', ?)
+                    ON CONFLICT (key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    [manifest["snapshot_id"]],
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+
+def _read_exposure_manifest(data_dir: Path, manifest_path: Path) -> dict[str, Any]:
+    if not manifest_path.is_file():
+        raise ValueError(f"exposure snapshot manifest is missing: {manifest_path}")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    snapshot_id = manifest.get("snapshot_id")
+    if (
+        not isinstance(snapshot_id, str)
+        or not snapshot_id.startswith("p6x-")
+        or manifest.get("snapshot_type") != "point_in_time_exposure"
+    ):
+        raise ValueError("exposure snapshot manifest identity mismatch")
+    expected = data_dir / "manifests" / snapshot_id / "manifest.json"
+    if manifest_path.resolve() != expected.resolve():
+        raise ValueError("exposure snapshot must use its canonical manifest path")
+    return cast(dict[str, Any], manifest)
+
+
+def _sync_exposure_manifest(
+    connection: duckdb.DuckDBPyConnection,
+    data_dir: Path,
+    manifest: dict[str, Any],
+    validation: dict[str, object],
+) -> None:
+    snapshot_id = str(manifest["snapshot_id"])
+    scope = manifest["coverage_scope"]
+    artifact_ids: dict[str, str] = {}
+    market_row_count = 0
+
+    checked_artifact_count = validation["checked_artifact_count"]
+    if not isinstance(checked_artifact_count, int):
+        raise ValueError("exposure validation returned an invalid artifact count")
+    connection.execute(
+        """
+        INSERT INTO meta.dataset_snapshot
+            (snapshot_id, snapshot_type, status, identity_sha256,
+             schema_version, config_sha256, source_config, universe_config,
+             row_count, security_count, start_date, end_date, quality_status,
+             parent_snapshot_id)
+        VALUES (?, 'point_in_time_exposure', 'valid', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (snapshot_id) DO NOTHING
+        """,
+        [
+            snapshot_id,
+            manifest["identity_sha256"],
+            int(manifest["schema_version"]),
+            manifest["policy_sha256"],
+            _canonical_json(manifest["source"]),
+            _canonical_json(scope),
+            sum(
+                int(item["row_count"])
+                for item in manifest["artifacts"]
+                if str(item["name"]).startswith("market_cap/")
+            ),
+            0,
+            scope["start_date"],
+            scope["end_date"],
+            manifest["quality_status"],
+            manifest["phase5_snapshot_id"],
+        ],
+    )
+    stored = connection.execute(
+        """
+        SELECT snapshot_type, identity_sha256, parent_snapshot_id
+        FROM meta.dataset_snapshot
+        WHERE snapshot_id = ?
+        """,
+        [snapshot_id],
+    ).fetchone()
+    expected_snapshot = (
+        "point_in_time_exposure",
+        str(manifest["identity_sha256"]),
+        str(manifest["phase5_snapshot_id"]),
+    )
+    if stored is None or tuple(map(str, stored)) != expected_snapshot:
+        raise RuntimeError(f"exposure snapshot catalog is immutable: {snapshot_id}")
+
+    for item in manifest["artifacts"]:
+        name = str(item["name"])
+        _resolve_catalog_artifact(data_dir, str(item["path"]))
+        dataset_name = _exposure_dataset_name(name)
+        artifact_id = _upsert_artifact(
+            connection,
+            data_dir,
+            layer="research",
+            dataset_name=dataset_name,
+            relative_path=str(item["path"]),
+            artifact_format=str(item["format"]),
+            sha256=str(item["sha256"]),
+            schema_version=int(manifest["schema_version"]),
+            source_id="tushare",
+            row_count=int(item["row_count"]),
+            min_event_date=scope["start_date"],
+            max_event_date=scope["end_date"],
+        )
+        _link_artifact(connection, snapshot_id, artifact_id, dataset_name)
+        artifact_ids[name] = artifact_id
+        if dataset_name == "market.exposure_market_cap":
+            market_row_count += int(item["row_count"])
+
+    for raw_input in manifest["raw_inputs"]:
+        _resolve_catalog_artifact(data_dir, str(raw_input["path"]))
+        dataset_name = f"tushare.{raw_input['api_name']}"
+        artifact_id = _upsert_artifact(
+            connection,
+            data_dir,
+            layer="raw",
+            dataset_name=dataset_name,
+            relative_path=str(raw_input["path"]),
+            artifact_format="parquet",
+            sha256=str(raw_input["sha256"]),
+            schema_version=int(manifest["schema_version"]),
+            source_id="tushare",
+            row_count=int(raw_input["row_count"]),
+            min_event_date=scope["start_date"],
+            max_event_date=scope["end_date"],
+        )
+        _link_artifact(connection, snapshot_id, artifact_id, dataset_name)
+
+    quality = manifest["quality_report"]
+    _resolve_catalog_artifact(data_dir, str(quality["path"]))
+    quality_artifact_id = _upsert_artifact(
+        connection,
+        data_dir,
+        layer="report",
+        dataset_name="meta.exposure_quality_report",
+        relative_path=str(quality["path"]),
+        artifact_format="json",
+        sha256=str(quality["sha256"]),
+        schema_version=int(manifest["schema_version"]),
+        source_id=None,
+        row_count=None,
+        min_event_date=scope["start_date"],
+        max_event_date=scope["end_date"],
+    )
+    _link_artifact(
+        connection,
+        snapshot_id,
+        quality_artifact_id,
+        "meta.exposure_quality_report",
+    )
+
+    definitions = _read_exposure_frame(
+        data_dir,
+        manifest,
+        "industry_definition.parquet",
+    )
+    memberships = _read_exposure_frame(
+        data_dir,
+        manifest,
+        "industry_membership.parquet",
+    )
+    _sync_exposure_industries(
+        connection,
+        snapshot_id,
+        definitions,
+        memberships,
+        artifact_ids["industry_definition.parquet"],
+        artifact_ids["industry_membership.parquet"],
+    )
+    security_count = int(memberships["security_id"].nunique())
+    connection.execute(
+        """
+        UPDATE meta.dataset_snapshot
+        SET row_count = ?, security_count = ?
+        WHERE snapshot_id = ?
+        """,
+        [market_row_count, security_count, snapshot_id],
+    )
+    connection.execute(
+        """
+        INSERT INTO meta.quality_result
+            (snapshot_id, dataset_name, check_name, severity, status,
+             observed_value, threshold_value, affected_rows, details)
+        VALUES (?, 'research.exposure_snapshot', 'manifest_and_artifacts',
+                'error', 'pass', ?, ?, 0, ?)
+        ON CONFLICT (snapshot_id, dataset_name, check_name) DO NOTHING
+        """,
+        [
+            snapshot_id,
+            checked_artifact_count,
+            checked_artifact_count,
+            _canonical_json(validation),
+        ],
+    )
+
+
+def _sync_exposure_industries(
+    connection: duckdb.DuckDBPyConnection,
+    snapshot_id: str,
+    definitions: pd.DataFrame,
+    memberships: pd.DataFrame,
+    definition_artifact_id: str,
+    membership_artifact_id: str,
+) -> None:
+    definition_records: list[dict[str, object]] = []
+    definition_ids: dict[str, str] = {}
+    for row in definitions.to_dict("records"):
+        industry_id = str(row["industry_id"])
+        record = {
+            "exposure_snapshot_id": snapshot_id,
+            "industry_id": industry_id,
+            "source_index_code": str(row["source_index_code"]),
+            "industry_code": _catalog_scalar(row.get("industry_code")),
+            "industry_name": str(row["industry_name"]),
+            "level": str(row["level"]),
+            "classification_standard": str(row["classification_standard"]),
+            "source": str(row["source"]),
+            "source_artifact_id": definition_artifact_id,
+        }
+        definition_id = _record_sha256(record)
+        definition_ids[industry_id] = definition_id
+        definition_records.append({"definition_id": definition_id, **record})
+
+    membership_records: list[dict[str, object]] = []
+    for row in memberships.to_dict("records"):
+        industry_id = str(row["industry_id"])
+        member_definition_id = definition_ids.get(industry_id)
+        if member_definition_id is None:
+            raise ValueError(
+                f"industry membership references unknown definition: {industry_id}"
+            )
+        record = {
+            "exposure_snapshot_id": snapshot_id,
+            "definition_id": member_definition_id,
+            "security_id": str(row["security_id"]),
+            "effective_from": _catalog_scalar(row["effective_from"]),
+            "effective_to": _catalog_scalar(row.get("effective_to")),
+            "announced_at": _catalog_scalar(row.get("announced_at")),
+            "known_at": _catalog_scalar(row["known_at"]),
+            "known_at_source": str(row["known_at_source"]),
+            "source": str(row["source"]),
+            "source_artifact_id": membership_artifact_id,
+        }
+        membership_records.append({"membership_id": _record_sha256(record), **record})
+
+    batches = {
+        "phase6_industry_definition_batch": pd.DataFrame(definition_records),
+        "phase6_industry_membership_batch": pd.DataFrame(membership_records),
+    }
+    for name, batch in batches.items():
+        connection.register(name, batch)
+    try:
+        connection.execute(
+            """
+            INSERT INTO ref.industry_definition
+                (definition_id, exposure_snapshot_id, industry_id,
+                 source_index_code, industry_code, industry_name, level,
+                 classification_standard, source, source_artifact_id)
+            SELECT definition_id, exposure_snapshot_id, industry_id,
+                   source_index_code, industry_code, industry_name, level,
+                   classification_standard, source, source_artifact_id
+            FROM phase6_industry_definition_batch
+            ON CONFLICT (definition_id) DO NOTHING
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO ref.industry_membership_history
+                (membership_id, exposure_snapshot_id, definition_id,
+                 security_id, effective_from, effective_to, announced_at,
+                 known_at, known_at_source, source, source_artifact_id)
+            SELECT membership_id, exposure_snapshot_id, definition_id,
+                   security_id, effective_from, effective_to, announced_at,
+                   known_at, known_at_source, source, source_artifact_id
+            FROM phase6_industry_membership_batch
+            ON CONFLICT (membership_id) DO NOTHING
+            """
+        )
+    finally:
+        for name in batches:
+            connection.unregister(name)
+
+
+def _read_exposure_frame(
+    data_dir: Path, manifest: dict[str, Any], name: str
+) -> pd.DataFrame:
+    item = next(
+        (artifact for artifact in manifest["artifacts"] if artifact["name"] == name),
+        None,
+    )
+    if item is None:
+        raise ValueError(f"exposure snapshot manifest is missing artifact: {name}")
+    path = _resolve_catalog_artifact(data_dir, str(item["path"]))
+    if hashlib.sha256(path.read_bytes()).hexdigest() != str(item["sha256"]):
+        raise ValueError(f"invalid exposure snapshot artifact checksum: {name}")
+    return pd.read_parquet(path)
+
+
+def _resolve_catalog_artifact(data_dir: Path, relative_path: str) -> Path:
+    if Path(relative_path).is_absolute():
+        raise ValueError("exposure artifact path must be relative to data_dir")
+    root = data_dir.resolve()
+    path = (data_dir / relative_path).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as error:
+        raise ValueError("exposure artifact path escapes data_dir") from error
+    if not path.is_file():
+        raise ValueError(f"exposure artifact is missing: {relative_path}")
+    return path
+
+
+def _exposure_dataset_name(name: str) -> str:
+    if name.startswith("market_cap/"):
+        return "market.exposure_market_cap"
+    return {
+        "industry_definition.parquet": "ref.industry_definition",
+        "industry_membership.parquet": "ref.industry_membership_history",
+    }[name]
+
+
+def _record_sha256(record: dict[str, object]) -> str:
+    normalized = {key: _catalog_scalar(value) for key, value in record.items()}
+    return hashlib.sha256(_canonical_json(normalized).encode("utf-8")).hexdigest()
+
+
+def _catalog_scalar(value: object) -> object:
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    item = getattr(value, "item", None)
+    return item() if callable(item) else value
 
 
 def _sync_research_manifest(
