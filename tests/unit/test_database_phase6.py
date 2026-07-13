@@ -10,6 +10,7 @@ import pytest
 
 from alpha_lab.database import catalog
 from alpha_lab.research_data.provider import TushareArtifact
+from alpha_lab.robustness import exposure_snapshot
 from alpha_lab.robustness.config import load_robustness_config
 from alpha_lab.robustness.contracts import ExposureTables
 from alpha_lab.robustness.exposure_data import (
@@ -100,6 +101,92 @@ def test_robustness_tables_enforce_sha256_and_foreign_keys(tmp_path: Path) -> No
             )
 
 
+def test_test_request_rejects_a_different_locked_range(tmp_path: Path) -> None:
+    database_path = catalog.initialize_database(
+        tmp_path / "metadata.duckdb"
+    ).database_path
+    with duckdb.connect(str(database_path)) as connection:
+        _seed_factor_freezes(connection)
+
+        with pytest.raises(duckdb.ConstraintException):
+            _insert_test_request(
+                connection,
+                request_id="request-wrong-range",
+                freeze_id="freeze-one",
+                freeze_sha256="1" * 64,
+                test_start="2026-01-02",
+                test_end="2026-07-11",
+            )
+
+
+def test_test_approval_rejects_a_wrong_confirmed_freeze_hash(
+    tmp_path: Path,
+) -> None:
+    database_path = catalog.initialize_database(
+        tmp_path / "metadata.duckdb"
+    ).database_path
+    with duckdb.connect(str(database_path)) as connection:
+        _seed_factor_freezes(connection)
+        _insert_test_request(connection)
+
+        with pytest.raises(duckdb.ConstraintException):
+            _insert_test_approval(connection, confirmed_freeze_sha256="2" * 64)
+
+
+def test_final_test_run_rejects_a_different_freeze(tmp_path: Path) -> None:
+    database_path = catalog.initialize_database(
+        tmp_path / "metadata.duckdb"
+    ).database_path
+    with duckdb.connect(str(database_path)) as connection:
+        _seed_factor_freezes(connection)
+        _insert_test_request(connection)
+        _insert_test_approval(connection)
+
+        with pytest.raises(duckdb.ConstraintException):
+            _insert_final_test_run(
+                connection,
+                freeze_id="freeze-two",
+                freeze_sha256="2" * 64,
+            )
+
+
+def test_final_test_run_rejects_a_different_locked_range(tmp_path: Path) -> None:
+    database_path = catalog.initialize_database(
+        tmp_path / "metadata.duckdb"
+    ).database_path
+    with duckdb.connect(str(database_path)) as connection:
+        _seed_factor_freezes(connection)
+        _insert_test_request(connection)
+        _insert_test_approval(connection)
+
+        with pytest.raises(duckdb.ConstraintException):
+            _insert_final_test_run(connection, test_end="2026-07-10")
+
+
+def test_robustness_state_chain_accepts_the_exact_freeze_identity(
+    tmp_path: Path,
+) -> None:
+    database_path = catalog.initialize_database(
+        tmp_path / "metadata.duckdb"
+    ).database_path
+    with duckdb.connect(str(database_path)) as connection:
+        _seed_factor_freezes(connection)
+        _insert_test_request(connection)
+        _insert_test_approval(connection)
+        _insert_final_test_run(connection)
+
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM research.test_request),
+                (SELECT count(*) FROM research.test_approval),
+                (SELECT count(*) FROM research.final_test_run)
+            """
+        ).fetchone()
+
+    assert counts == (1, 1, 1)
+
+
 def test_exposure_snapshot_sync_is_bulk_and_idempotent(tmp_path: Path) -> None:
     data_dir = tmp_path / "data"
     exposure = _materialize_exposure_fixture(data_dir)
@@ -154,6 +241,102 @@ def test_exposure_snapshot_sync_rejects_tampered_artifact(tmp_path: Path) -> Non
         )
 
 
+@pytest.mark.parametrize(
+    "target",
+    ["market_cap", "raw", "quality", "industry", "phase5"],
+)
+def test_exposure_sync_rejects_post_validation_file_tamper_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    data_dir = tmp_path / "data"
+    exposure = _materialize_exposure_fixture(data_dir)
+    database_path = data_dir / "metadata.duckdb"
+    real_validate = exposure_snapshot.validate_exposure_snapshot
+
+    def validate_then_tamper(root: Path, snapshot_id: str) -> dict[str, object]:
+        result = real_validate(root, snapshot_id)
+        path = _post_validation_target(data_dir, exposure.manifest_path, target)
+        if target in {"market_cap", "industry", "phase5"}:
+            frame = pd.read_parquet(path)
+            frame.to_parquet(path, index=False, compression="gzip")
+        else:
+            path.write_bytes(path.read_bytes() + b" ")
+        return result
+
+    monkeypatch.setattr(
+        exposure_snapshot,
+        "validate_exposure_snapshot",
+        validate_then_tamper,
+    )
+
+    with pytest.raises(ValueError, match="checksum"):
+        catalog.sync_exposure_snapshot(database_path, data_dir, exposure.manifest_path)
+
+    assert _transactional_catalog_counts(database_path) == (0, 0, 0, 0)
+
+
+def test_exposure_sync_rejects_post_validation_manifest_path_escape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    exposure = _materialize_exposure_fixture(data_dir)
+    database_path = data_dir / "metadata.duckdb"
+    real_validate = exposure_snapshot.validate_exposure_snapshot
+
+    def validate_then_escape(root: Path, snapshot_id: str) -> dict[str, object]:
+        result = real_validate(root, snapshot_id)
+        manifest = json.loads(exposure.manifest_path.read_text(encoding="utf-8"))
+        manifest["raw_inputs"][0]["path"] = "../../escaped.parquet"
+        exposure.manifest_path.write_text(
+            json.dumps(manifest, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return result
+
+    monkeypatch.setattr(
+        exposure_snapshot,
+        "validate_exposure_snapshot",
+        validate_then_escape,
+    )
+
+    with pytest.raises(ValueError, match="manifest changed|escapes data_dir"):
+        catalog.sync_exposure_snapshot(database_path, data_dir, exposure.manifest_path)
+
+    assert _transactional_catalog_counts(database_path) == (0, 0, 0, 0)
+
+
+def test_catalog_artifact_resolution_rejects_path_escape(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    escaped = tmp_path / "escaped.parquet"
+    escaped.write_bytes(b"fixture")
+
+    with pytest.raises(ValueError, match="escapes data_dir"):
+        catalog._resolve_catalog_artifact(data_dir, "../escaped.parquet")
+
+
+def test_exposure_sync_rolls_back_a_forced_mid_transaction_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    exposure = _materialize_exposure_fixture(data_dir)
+    database_path = data_dir / "metadata.duckdb"
+
+    def fail_after_parent_sync(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("forced exposure catalog failure")
+
+    monkeypatch.setattr(catalog, "_sync_exposure_manifest", fail_after_parent_sync)
+
+    with pytest.raises(RuntimeError, match="forced exposure catalog failure"):
+        catalog.sync_exposure_snapshot(database_path, data_dir, exposure.manifest_path)
+
+    assert _transactional_catalog_counts(database_path) == (0, 0, 0, 0)
+
+
 def test_exposure_snapshot_sync_rejects_detached_manifest_reference(
     tmp_path: Path,
 ) -> None:
@@ -180,6 +363,132 @@ def test_applied_robustness_migration_checksum_is_immutable(tmp_path: Path) -> N
         catalog.initialize_database(database_path)
 
 
+def _seed_factor_freezes(connection: duckdb.DuckDBPyConnection) -> None:
+    connection.execute(
+        """
+        INSERT INTO research.factor_definition
+            (factor_id, name, family, description)
+        VALUES ('F1002', 'phase6-fixture-factor', 'liquidity', 'fixture')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO research.factor_version
+            (factor_version_id, factor_id, formula, implementation_path,
+             code_sha256, metadata_sha256, lookback, direction)
+        VALUES ('F1002-fixture', 'F1002', 'fixture', 'fixture.py', ?, ?, 20, 1)
+        """,
+        ["a" * 64, "b" * 64],
+    )
+    for freeze_id, freeze_sha256 in (
+        ("freeze-one", "1" * 64),
+        ("freeze-two", "2" * 64),
+    ):
+        connection.execute(
+            """
+            INSERT INTO research.factor_freeze
+                (freeze_id, freeze_sha256, factor_version_id,
+                 phase5_snapshot_id, exposure_snapshot_id,
+                 robustness_policy_sha256, cost_policy_sha256, code_commit,
+                 test_start, test_end, manifest_artifact_id)
+            VALUES (?, ?, 'F1002-fixture', 'p5-fixture', 'p6x-fixture',
+                    ?, ?, 'c0ffee', DATE '2026-01-01', DATE '2026-07-11', ?)
+            """,
+            [freeze_id, freeze_sha256, "c" * 64, "d" * 64, "e" * 64],
+        )
+
+
+def _insert_test_request(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    request_id: str = "request-one",
+    freeze_id: str = "freeze-one",
+    freeze_sha256: str = "1" * 64,
+    test_start: str = "2026-01-01",
+    test_end: str = "2026-07-11",
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO research.test_request
+            (request_id, request_sha256, freeze_id, freeze_sha256,
+             robustness_report_sha256, test_start, test_end)
+        VALUES (?, ?, ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE))
+        """,
+        [
+            request_id,
+            "3" * 64,
+            freeze_id,
+            freeze_sha256,
+            "4" * 64,
+            test_start,
+            test_end,
+        ],
+    )
+
+
+def _insert_test_approval(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    approval_id: str = "approval-one",
+    request_id: str = "request-one",
+    freeze_id: str = "freeze-one",
+    confirmed_freeze_sha256: str = "1" * 64,
+    test_start: str = "2026-01-01",
+    test_end: str = "2026-07-11",
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO research.test_approval
+            (approval_id, approval_sha256, request_id, freeze_id,
+             confirmed_freeze_sha256, test_start, test_end, approver)
+        VALUES (?, ?, ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE), 'reviewer')
+        """,
+        [
+            approval_id,
+            "5" * 64,
+            request_id,
+            freeze_id,
+            confirmed_freeze_sha256,
+            test_start,
+            test_end,
+        ],
+    )
+
+
+def _insert_final_test_run(
+    connection: duckdb.DuckDBPyConnection,
+    *,
+    approval_id: str = "approval-one",
+    request_id: str = "request-one",
+    freeze_id: str = "freeze-one",
+    freeze_sha256: str = "1" * 64,
+    test_start: str = "2026-01-01",
+    test_end: str = "2026-07-11",
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO research.final_test_run
+            (test_run_id, run_sha256, approval_id, request_id, freeze_id,
+             freeze_sha256, result_artifact_id, report_artifact_id, status,
+             test_start, test_end, started_at, finished_at)
+        VALUES ('final-one', ?, ?, ?, ?, ?, ?, ?, 'success',
+                CAST(? AS DATE), CAST(? AS DATE), current_timestamp,
+                current_timestamp)
+        """,
+        [
+            "6" * 64,
+            approval_id,
+            request_id,
+            freeze_id,
+            freeze_sha256,
+            "7" * 64,
+            "8" * 64,
+            test_start,
+            test_end,
+        ],
+    )
+
+
 def _exposure_counts(database_path: Path, snapshot_id: str) -> tuple[int, ...]:
     with duckdb.connect(str(database_path), read_only=True) as connection:
         return connection.execute(
@@ -198,6 +507,57 @@ def _exposure_counts(database_path: Path, snapshot_id: str) -> tuple[int, ...]:
             """,
             [snapshot_id, snapshot_id, snapshot_id, snapshot_id],
         ).fetchone()
+
+
+def _transactional_catalog_counts(database_path: Path) -> tuple[int, ...]:
+    with duckdb.connect(str(database_path), read_only=True) as connection:
+        return connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM meta.dataset_snapshot),
+                (SELECT count(*) FROM ref.security),
+                (SELECT count(*) FROM meta.artifact),
+                (SELECT count(*) FROM meta.repository_state
+                 WHERE key = 'latest_exposure_snapshot_id')
+            """
+        ).fetchone()
+
+
+def _post_validation_target(
+    data_dir: Path,
+    manifest_path: Path,
+    target: str,
+) -> Path:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if target == "market_cap":
+        item = next(
+            artifact
+            for artifact in manifest["artifacts"]
+            if artifact["name"].startswith("market_cap/")
+        )
+    elif target == "raw":
+        item = manifest["raw_inputs"][0]
+    elif target == "quality":
+        item = manifest["quality_report"]
+    elif target == "industry":
+        item = next(
+            artifact
+            for artifact in manifest["artifacts"]
+            if artifact["name"] == "industry_membership.parquet"
+        )
+    elif target == "phase5":
+        phase5_path = (
+            data_dir / "manifests" / manifest["phase5_snapshot_id"] / "manifest.json"
+        )
+        phase5 = json.loads(phase5_path.read_text(encoding="utf-8"))
+        item = next(
+            artifact
+            for artifact in phase5["artifacts"]
+            if artifact["name"] == "security_master.parquet"
+        )
+    else:
+        raise AssertionError(f"unknown tamper target: {target}")
+    return data_dir / item["path"]
 
 
 def _materialize_exposure_fixture(data_dir: Path):

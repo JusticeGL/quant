@@ -52,14 +52,17 @@ CREATE TABLE IF NOT EXISTS research.factor_freeze (
         CHECK (regexp_full_match(manifest_artifact_id, '[0-9a-f]{64}')),
     status VARCHAR NOT NULL DEFAULT 'frozen' CHECK (status = 'frozen'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT current_timestamp,
-    CHECK (test_end >= test_start)
+    CHECK (test_end >= test_start),
+    UNIQUE(freeze_id, freeze_sha256, test_start, test_end)
 );
 
 CREATE TABLE IF NOT EXISTS research.test_request (
     request_id VARCHAR PRIMARY KEY,
     request_sha256 VARCHAR NOT NULL UNIQUE
         CHECK (regexp_full_match(request_sha256, '[0-9a-f]{64}')),
-    freeze_id VARCHAR NOT NULL REFERENCES research.factor_freeze(freeze_id),
+    freeze_id VARCHAR NOT NULL,
+    freeze_sha256 VARCHAR NOT NULL
+        CHECK (regexp_full_match(freeze_sha256, '[0-9a-f]{64}')),
     robustness_report_sha256 VARCHAR NOT NULL
         CHECK (regexp_full_match(robustness_report_sha256, '[0-9a-f]{64}')),
     test_start DATE NOT NULL,
@@ -67,27 +70,48 @@ CREATE TABLE IF NOT EXISTS research.test_request (
     status VARCHAR NOT NULL DEFAULT 'test_requested'
         CHECK (status = 'test_requested'),
     requested_at TIMESTAMPTZ NOT NULL DEFAULT current_timestamp,
-    CHECK (test_end >= test_start)
+    CHECK (test_end >= test_start),
+    FOREIGN KEY (freeze_id, freeze_sha256, test_start, test_end)
+        REFERENCES research.factor_freeze(
+            freeze_id, freeze_sha256, test_start, test_end
+        ),
+    UNIQUE(request_id, freeze_id, freeze_sha256, test_start, test_end)
 );
 
 CREATE TABLE IF NOT EXISTS research.test_approval (
     approval_id VARCHAR PRIMARY KEY,
     approval_sha256 VARCHAR NOT NULL UNIQUE
         CHECK (regexp_full_match(approval_sha256, '[0-9a-f]{64}')),
-    request_id VARCHAR NOT NULL REFERENCES research.test_request(request_id),
+    request_id VARCHAR NOT NULL,
+    freeze_id VARCHAR NOT NULL,
     confirmed_freeze_sha256 VARCHAR NOT NULL
         CHECK (regexp_full_match(confirmed_freeze_sha256, '[0-9a-f]{64}')),
+    test_start DATE NOT NULL,
+    test_end DATE NOT NULL,
     approver VARCHAR NOT NULL CHECK (length(trim(approver)) > 0),
     status VARCHAR NOT NULL DEFAULT 'approved' CHECK (status = 'approved'),
-    approved_at TIMESTAMPTZ NOT NULL DEFAULT current_timestamp
+    approved_at TIMESTAMPTZ NOT NULL DEFAULT current_timestamp,
+    CHECK (test_end >= test_start),
+    FOREIGN KEY (
+        request_id, freeze_id, confirmed_freeze_sha256, test_start, test_end
+    ) REFERENCES research.test_request(
+        request_id, freeze_id, freeze_sha256, test_start, test_end
+    ),
+    UNIQUE(
+        approval_id, request_id, freeze_id, confirmed_freeze_sha256,
+        test_start, test_end
+    )
 );
 
 CREATE TABLE IF NOT EXISTS research.final_test_run (
     test_run_id VARCHAR PRIMARY KEY,
     run_sha256 VARCHAR NOT NULL UNIQUE
         CHECK (regexp_full_match(run_sha256, '[0-9a-f]{64}')),
-    approval_id VARCHAR NOT NULL REFERENCES research.test_approval(approval_id),
-    freeze_id VARCHAR NOT NULL REFERENCES research.factor_freeze(freeze_id),
+    approval_id VARCHAR NOT NULL,
+    request_id VARCHAR NOT NULL,
+    freeze_id VARCHAR NOT NULL,
+    freeze_sha256 VARCHAR NOT NULL
+        CHECK (regexp_full_match(freeze_sha256, '[0-9a-f]{64}')),
     result_artifact_id VARCHAR NOT NULL
         CHECK (regexp_full_match(result_artifact_id, '[0-9a-f]{64}')),
     report_artifact_id VARCHAR NOT NULL
@@ -99,7 +123,13 @@ CREATE TABLE IF NOT EXISTS research.final_test_run (
     started_at TIMESTAMPTZ NOT NULL,
     finished_at TIMESTAMPTZ NOT NULL,
     CHECK (test_end >= test_start),
-    CHECK (finished_at >= started_at)
+    CHECK (finished_at >= started_at),
+    FOREIGN KEY (
+        approval_id, request_id, freeze_id, freeze_sha256, test_start, test_end
+    ) REFERENCES research.test_approval(
+        approval_id, request_id, freeze_id, confirmed_freeze_sha256,
+        test_start, test_end
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_industry_definition_snapshot

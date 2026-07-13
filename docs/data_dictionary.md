@@ -72,11 +72,16 @@ SHA256。
 | `market.exposure_market_cap` | `trade_date,security_id` | `known_at` | 总市值和流通市值，单位 CNY；按年保留在 Parquet，DuckDB 只登记 artifact |
 | `ref.industry_definition` | `definition_id` | 快照身份 | SW2021 行业定义；`definition_id` 是记录内容 SHA256，`exposure_snapshot_id,industry_id` 唯一 |
 | `ref.industry_membership_history` | `membership_id` | `effective_from,effective_to,known_at` | 证券行业区间；同时外键引用行业定义和 `ref.security` |
-| `research.factor_freeze` | `freeze_id` | `created_at` | 锁定因子版本、Phase 5/暴露快照、策略哈希、Git commit 与最终测试区间 |
-| `research.test_request` | `request_id` | `requested_at` | 指向一个 freeze 和稳健性报告 SHA256，状态固定为 `test_requested` |
-| `research.test_approval` | `approval_id` | `approved_at` | 实名审批人对 request 及精确 freeze SHA256 的批准 |
-| `research.final_test_run` | `test_run_id` | `started_at,finished_at` | 指向 approval/freeze 及不可变结果、报告 artifact SHA256 标识 |
+| `research.factor_freeze` | `freeze_id` | `created_at` | 锁定因子版本、Phase 5/暴露快照、策略哈希、Git commit 与最终测试区间；`freeze_id,freeze_sha256,test_start,test_end` 为唯一候选键 |
+| `research.test_request` | `request_id` | `requested_at` | 携带 `freeze_id,freeze_sha256,test_start,test_end`，复合外键引用完全一致的 freeze；状态固定为 `test_requested` |
+| `research.test_approval` | `approval_id` | `approved_at` | 携带 request、freeze、`confirmed_freeze_sha256` 与测试区间，复合外键保证实名审批精确绑定该 request |
+| `research.final_test_run` | `test_run_id` | `started_at,finished_at` | 携带 approval/request/freeze/hash/range 并复合引用完整审批身份；错误 freeze、hash 或区间由 DuckDB constraint 拒绝 |
 
 `effective_from <= D <= effective_to` 且 `known_at <= D` 时，行业成员记录才在
 日期 `D` 可见。`known_at_source=effective_date_fallback` 表示上游无公告日，
 使用生效日作为保守回退；禁止使用当前行业回填历史。
+
+Catalog 同步在 Task 2 验证后记录 manifest SHA256，并在 DuckDB 写锁与
+事务内重读 manifest、比较 SHA256，然后对 market-cap、raw、quality、
+industry 与必需 Phase 5 依赖的当前文件字节逐一重算 SHA256。登记的
+是实算值；验证后篡改、路径逃逸或中途异常均使整个同步事务回滚。

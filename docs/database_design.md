@@ -68,10 +68,13 @@ point-in-time column and schema version. New files must be registered in
 DuckDB 1.5.4 enforces primary keys, unique constraints, checks and foreign keys
 within one schema, but does not support foreign keys across schemas. Phase 6
 therefore uses physical foreign keys from industry membership to industry
-definition/security inside `ref`, and from approvals/final-test runs through the
-state chain inside `research`. Snapshot and artifact references that cross into
-`meta` are explicit logical foreign keys backed by immutable SHA256 identifiers.
-`make db-check` validates the catalog boundary and fails if an orphan is present.
+definition/security inside `ref`. Inside `research`, each state carries the
+same freeze ID, freeze SHA256 and locked test range. Composite candidate keys
+and foreign keys bind request to freeze, approval to request, and final-test run
+to approval/request; a mismatched hash, freeze, or range is rejected by DuckDB.
+Snapshot and artifact references that cross into `meta` are explicit logical
+foreign keys backed by immutable SHA256 identifiers. `make db-check` validates
+the catalog boundary and fails if an orphan is present.
 
 ## Migrations
 
@@ -94,22 +97,30 @@ already applied version is rejected.
 
 `sync_exposure_snapshot(database_path, data_dir, manifest_path)` accepts only a
 Task 2 manifest at its canonical `data/manifests/p6x-*/manifest.json` path. It
-revalidates the manifest identity, Phase 5 dependency, quality report, artifact
-layout and every SHA256 before opening a catalog transaction. It registers the
-Phase 5 parent and all exposure/raw/quality artifacts, then bulk inserts industry
-definitions and membership history with `INSERT ... SELECT ... ON CONFLICT`.
-Repeating the same sync is idempotent. Artifact paths outside `data_dir`, hash
-drift and unknown references are rejected; no daily market-cap rows are copied
-into DuckDB.
+runs the complete Task 2 semantic validation and records the validated manifest
+SHA256. Inside the catalog lock and transaction, it re-reads the canonical
+manifest, requires the SHA256 to be unchanged, then computes the current SHA256
+from every exposure, raw, quality, industry and required Phase 5 file. The
+computed digest, not an unchecked declared value, is passed to artifact
+registration. Only after those checks does it register the Phase 5 parent and
+artifacts and bulk insert industry definitions/membership with
+`INSERT ... SELECT ... ON CONFLICT`.
+
+Repeating the same sync is idempotent. Post-validation mutation, artifact paths
+outside `data_dir`, hash drift and unknown references are rejected. Any failure
+rolls back Phase 5/exposure rows and the latest-state update together. No daily
+market-cap rows are copied into DuckDB.
 
 The normalized state tables are:
 
-- `research.factor_freeze`: exact candidate/data/policy hashes and locked range.
-- `research.test_request`: one robustness-passed request linked to its freeze.
-- `research.test_approval`: named human approval linked to the exact request and
-  confirmed freeze hash.
-- `research.final_test_run`: immutable final result metadata linked to both the
-  approval and freeze.
+- `research.factor_freeze`: exact candidate/data/policy hashes and locked range;
+  exposes a unique `(freeze_id, freeze_sha256, test_start, test_end)` identity.
+- `research.test_request`: carries and composite-references that exact freeze
+  identity.
+- `research.test_approval`: carries the request, freeze, confirmed freeze hash
+  and range and composite-references the exact request identity.
+- `research.final_test_run`: carries approval, request, freeze, hash and range
+  and composite-references the exact approved identity.
 
 ## Commands
 

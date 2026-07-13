@@ -18,6 +18,7 @@ import pandas as pd
 
 from alpha_lab.data.config import load_phase1_config
 from alpha_lab.data.normalize import to_qlib_instrument
+from alpha_lab.data.providers.base import file_sha256
 
 SCHEMA_VERSION = 3
 MIGRATIONS = (
@@ -599,7 +600,9 @@ def sync_exposure_snapshot(
     database_path: Path, data_dir: Path, manifest_path: Path
 ) -> None:
     """Synchronize one validated Phase 6 exposure snapshot into the catalog."""
-    manifest = _read_exposure_manifest(data_dir, manifest_path)
+    manifest, validated_manifest_sha256 = _read_exposure_manifest(
+        data_dir, manifest_path
+    )
     from alpha_lab.robustness.exposure_snapshot import validate_exposure_snapshot
 
     validation = validate_exposure_snapshot(data_dir, str(manifest["snapshot_id"]))
@@ -607,18 +610,38 @@ def sync_exposure_snapshot(
         raise ValueError(
             f"invalid exposure snapshot: {_canonical_json(validation['failures'])}"
         )
-    phase5_manifest_path = (
-        data_dir / "manifests" / str(manifest["phase5_snapshot_id"]) / "manifest.json"
-    )
-    phase5_manifest = json.loads(phase5_manifest_path.read_text(encoding="utf-8"))
-
     with _catalog_write_lock(database_path):
         initialize_database(database_path)
         with duckdb.connect(str(database_path)) as connection:
             connection.execute("BEGIN TRANSACTION")
             try:
-                _sync_research_manifest(connection, data_dir, phase5_manifest)
-                _sync_exposure_manifest(connection, data_dir, manifest, validation)
+                current_manifest, current_manifest_sha256 = _read_exposure_manifest(
+                    data_dir, manifest_path
+                )
+                if current_manifest_sha256 != validated_manifest_sha256:
+                    raise ValueError("exposure manifest changed after validation")
+                phase5_manifest = _read_verified_phase5_manifest(
+                    data_dir, current_manifest
+                )
+                phase5_verified_sha256 = _verify_manifest_artifacts(
+                    data_dir, phase5_manifest
+                )
+                exposure_verified_sha256 = _verify_manifest_artifacts(
+                    data_dir, current_manifest, include_quality_report=True
+                )
+                _sync_research_manifest(
+                    connection,
+                    data_dir,
+                    phase5_manifest,
+                    verified_sha256=phase5_verified_sha256,
+                )
+                _sync_exposure_manifest(
+                    connection,
+                    data_dir,
+                    current_manifest,
+                    validation,
+                    exposure_verified_sha256,
+                )
                 connection.execute(
                     """
                     INSERT INTO meta.repository_state (key, value)
@@ -627,7 +650,7 @@ def sync_exposure_snapshot(
                         value = excluded.value,
                         updated_at = excluded.updated_at
                     """,
-                    [manifest["snapshot_id"]],
+                    [current_manifest["snapshot_id"]],
                 )
                 connection.execute("COMMIT")
             except Exception:
@@ -635,10 +658,15 @@ def sync_exposure_snapshot(
                 raise
 
 
-def _read_exposure_manifest(data_dir: Path, manifest_path: Path) -> dict[str, Any]:
+def _read_exposure_manifest(
+    data_dir: Path, manifest_path: Path
+) -> tuple[dict[str, Any], str]:
     if not manifest_path.is_file():
         raise ValueError(f"exposure snapshot manifest is missing: {manifest_path}")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    content = manifest_path.read_bytes()
+    manifest = json.loads(content)
+    if not isinstance(manifest, dict):
+        raise ValueError("exposure snapshot manifest must be a JSON object")
     snapshot_id = manifest.get("snapshot_id")
     if (
         not isinstance(snapshot_id, str)
@@ -649,6 +677,31 @@ def _read_exposure_manifest(data_dir: Path, manifest_path: Path) -> dict[str, An
     expected = data_dir / "manifests" / snapshot_id / "manifest.json"
     if manifest_path.resolve() != expected.resolve():
         raise ValueError("exposure snapshot must use its canonical manifest path")
+    return (
+        cast(dict[str, Any], manifest),
+        hashlib.sha256(content).hexdigest(),
+    )
+
+
+def _read_verified_phase5_manifest(
+    data_dir: Path, exposure_manifest: dict[str, Any]
+) -> dict[str, Any]:
+    snapshot_id = str(exposure_manifest["phase5_snapshot_id"])
+    path = _resolve_catalog_artifact(
+        data_dir,
+        (Path("manifests") / snapshot_id / "manifest.json").as_posix(),
+    )
+    content = path.read_bytes()
+    actual_sha256 = hashlib.sha256(content).hexdigest()
+    if actual_sha256 != str(exposure_manifest["phase5_manifest_sha256"]):
+        raise ValueError("catalog artifact checksum mismatch: Phase 5 manifest")
+    manifest = json.loads(content)
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("snapshot_id") != snapshot_id
+        or manifest.get("snapshot_type") != "research_market"
+    ):
+        raise ValueError("Phase 5 manifest identity mismatch")
     return cast(dict[str, Any], manifest)
 
 
@@ -657,6 +710,7 @@ def _sync_exposure_manifest(
     data_dir: Path,
     manifest: dict[str, Any],
     validation: dict[str, object],
+    verified_sha256: dict[str, str],
 ) -> None:
     snapshot_id = str(manifest["snapshot_id"])
     scope = manifest["coverage_scope"]
@@ -713,7 +767,7 @@ def _sync_exposure_manifest(
 
     for item in manifest["artifacts"]:
         name = str(item["name"])
-        _resolve_catalog_artifact(data_dir, str(item["path"]))
+        actual_sha256 = _registration_sha256(data_dir, item, verified_sha256)
         dataset_name = _exposure_dataset_name(name)
         artifact_id = _upsert_artifact(
             connection,
@@ -722,7 +776,7 @@ def _sync_exposure_manifest(
             dataset_name=dataset_name,
             relative_path=str(item["path"]),
             artifact_format=str(item["format"]),
-            sha256=str(item["sha256"]),
+            sha256=actual_sha256,
             schema_version=int(manifest["schema_version"]),
             source_id="tushare",
             row_count=int(item["row_count"]),
@@ -735,7 +789,7 @@ def _sync_exposure_manifest(
             market_row_count += int(item["row_count"])
 
     for raw_input in manifest["raw_inputs"]:
-        _resolve_catalog_artifact(data_dir, str(raw_input["path"]))
+        actual_sha256 = _registration_sha256(data_dir, raw_input, verified_sha256)
         dataset_name = f"tushare.{raw_input['api_name']}"
         artifact_id = _upsert_artifact(
             connection,
@@ -744,7 +798,7 @@ def _sync_exposure_manifest(
             dataset_name=dataset_name,
             relative_path=str(raw_input["path"]),
             artifact_format="parquet",
-            sha256=str(raw_input["sha256"]),
+            sha256=actual_sha256,
             schema_version=int(manifest["schema_version"]),
             source_id="tushare",
             row_count=int(raw_input["row_count"]),
@@ -754,7 +808,7 @@ def _sync_exposure_manifest(
         _link_artifact(connection, snapshot_id, artifact_id, dataset_name)
 
     quality = manifest["quality_report"]
-    _resolve_catalog_artifact(data_dir, str(quality["path"]))
+    actual_quality_sha256 = _registration_sha256(data_dir, quality, verified_sha256)
     quality_artifact_id = _upsert_artifact(
         connection,
         data_dir,
@@ -762,7 +816,7 @@ def _sync_exposure_manifest(
         dataset_name="meta.exposure_quality_report",
         relative_path=str(quality["path"]),
         artifact_format="json",
-        sha256=str(quality["sha256"]),
+        sha256=actual_quality_sha256,
         schema_version=int(manifest["schema_version"]),
         source_id=None,
         row_count=None,
@@ -923,6 +977,47 @@ def _read_exposure_frame(
     return pd.read_parquet(path)
 
 
+def _verified_artifact_sha256(data_dir: Path, artifact: dict[str, Any]) -> str:
+    relative_path = str(artifact["path"])
+    path = _resolve_catalog_artifact(data_dir, relative_path)
+    actual_sha256 = file_sha256(path)
+    if actual_sha256 != str(artifact["sha256"]):
+        raise ValueError(f"catalog artifact checksum mismatch: {relative_path}")
+    return actual_sha256
+
+
+def _verify_manifest_artifacts(
+    data_dir: Path,
+    manifest: dict[str, Any],
+    *,
+    include_quality_report: bool = True,
+) -> dict[str, str]:
+    artifacts = [*manifest.get("artifacts", []), *manifest.get("raw_inputs", [])]
+    quality = manifest.get("quality_report")
+    if include_quality_report and isinstance(quality, dict):
+        artifacts.append(quality)
+    verified: dict[str, str] = {}
+    for artifact in artifacts:
+        relative_path = str(artifact["path"])
+        verified[relative_path] = _verified_artifact_sha256(data_dir, artifact)
+    return verified
+
+
+def _registration_sha256(
+    data_dir: Path,
+    artifact: dict[str, Any],
+    verified_sha256: dict[str, str],
+) -> str:
+    relative_path = str(artifact["path"])
+    expected_sha256 = verified_sha256.get(relative_path)
+    if expected_sha256 is None:
+        raise ValueError(f"catalog artifact was not verified: {relative_path}")
+    actual_sha256 = _verified_artifact_sha256(data_dir, artifact)
+    if actual_sha256 != expected_sha256:
+        raise ValueError(f"catalog artifact changed during sync: {relative_path}")
+    return actual_sha256
+
+
 def _resolve_catalog_artifact(data_dir: Path, relative_path: str) -> Path:
     if Path(relative_path).is_absolute():
         raise ValueError("exposure artifact path must be relative to data_dir")
@@ -964,6 +1059,7 @@ def _sync_research_manifest(
     connection: duckdb.DuckDBPyConnection,
     data_root: Path,
     manifest: dict[str, Any],
+    verified_sha256: dict[str, str] | None = None,
 ) -> tuple[set[str], int]:
     snapshot_id = str(manifest["snapshot_id"])
     summary = manifest["summary"]
@@ -1000,6 +1096,11 @@ def _sync_research_manifest(
     for artifact in manifest.get("artifacts", []):
         name = str(artifact["name"])
         dataset_name = _research_dataset_name(name)
+        artifact_sha256 = (
+            _registration_sha256(data_root, artifact, verified_sha256)
+            if verified_sha256 is not None
+            else str(artifact["sha256"])
+        )
         artifact_id = _upsert_artifact(
             connection,
             data_root,
@@ -1007,7 +1108,7 @@ def _sync_research_manifest(
             dataset_name=dataset_name,
             relative_path=str(artifact["path"]),
             artifact_format=str(artifact.get("format", "parquet")),
-            sha256=str(artifact["sha256"]),
+            sha256=artifact_sha256,
             schema_version=int(manifest["schema_version"]),
             source_id="tushare",
             row_count=int(artifact["row_count"]),
@@ -1019,6 +1120,11 @@ def _sync_research_manifest(
         artifact_by_name[name] = artifact_id
 
     for raw_input in manifest.get("raw_inputs", []):
+        raw_sha256 = (
+            _registration_sha256(data_root, raw_input, verified_sha256)
+            if verified_sha256 is not None
+            else str(raw_input["sha256"])
+        )
         artifact_id = _upsert_artifact(
             connection,
             data_root,
@@ -1026,7 +1132,7 @@ def _sync_research_manifest(
             dataset_name=f"tushare.{raw_input['api_name']}",
             relative_path=str(raw_input["path"]),
             artifact_format="parquet",
-            sha256=str(raw_input["sha256"]),
+            sha256=raw_sha256,
             schema_version=int(manifest["schema_version"]),
             source_id="tushare",
             row_count=int(raw_input["row_count"]),
