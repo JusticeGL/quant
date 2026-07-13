@@ -353,6 +353,77 @@ def test_freeze_creation_and_validation_reject_invalid_quality_contracts(
             )
 
 
+@pytest.mark.parametrize("operation", ["create", "validate"])
+def test_freeze_creation_and_validation_reject_phase5_scope_retarget(
+    freeze_fixture: dict[str, Path], operation: str
+) -> None:
+    frozen = None
+    if operation == "validate":
+        frozen = freeze_candidate(
+            "F1002",
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+            freeze_fixture["experiments"],
+        )
+
+    _corrupt_and_republish_quality(freeze_fixture, "phase5", "coherent_scope_retarget")
+
+    with pytest.raises(ValueError, match="quality.*scope"):
+        if frozen is None:
+            freeze_candidate(
+                "F1002",
+                freeze_fixture["config"],
+                freeze_fixture["data"],
+                freeze_fixture["experiments"],
+            )
+        else:
+            validate_freeze(
+                frozen.freeze_path,
+                freeze_fixture["config"],
+                freeze_fixture["data"],
+            )
+
+
+@pytest.mark.parametrize("operation", ["create", "validate"])
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "detached_minimum_coverage",
+        "expected_industry_count_drift",
+        "observed_observation_count_drift",
+        "expected_security_count_drift",
+    ],
+)
+def test_freeze_creation_and_validation_reject_detached_exposure_coverage(
+    freeze_fixture: dict[str, Path], operation: str, corruption: str
+) -> None:
+    frozen = None
+    if operation == "validate":
+        frozen = freeze_candidate(
+            "F1002",
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+            freeze_fixture["experiments"],
+        )
+
+    _corrupt_and_republish_quality(freeze_fixture, "exposure", corruption)
+
+    with pytest.raises(ValueError, match="quality.*row_counts"):
+        if frozen is None:
+            freeze_candidate(
+                "F1002",
+                freeze_fixture["config"],
+                freeze_fixture["data"],
+                freeze_fixture["experiments"],
+            )
+        else:
+            validate_freeze(
+                frozen.freeze_path,
+                freeze_fixture["config"],
+                freeze_fixture["data"],
+            )
+
+
 @pytest.mark.parametrize(
     "target",
     [
@@ -865,6 +936,21 @@ def _corrupt_and_republish_quality(
             "status": "fail",
             "count": 1,
         }
+    elif corruption == "coherent_scope_retarget":
+        quality["scope"] = {
+            "index_code": "RETARGETED",
+            "start_date": "1990-01-01",
+            "end_date": "2099-01-01",
+        }
+    elif corruption == "detached_minimum_coverage":
+        quality["summary"]["minimum_temporal_coverage"] = 0.0
+    elif corruption == "expected_industry_count_drift":
+        quality["summary"]["expected_industry_count"] += 1
+    elif corruption == "observed_observation_count_drift":
+        quality["summary"]["observed_observation_count"] = 0
+        quality["summary"]["temporal_coverage_ratio"] = 0.0
+    elif corruption == "expected_security_count_drift":
+        quality["summary"]["expected_security_count"] = 2
     else:
         count_name = (
             "daily_bar_count" if snapshot_kind == "phase5" else "market_cap_count"

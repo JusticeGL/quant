@@ -29,7 +29,11 @@ _EXPOSURE_CHECKS = {
 }
 
 
-def phase5_quality_failures(quality: object, manifest: dict[str, Any]) -> list[str]:
+def phase5_quality_failures(
+    quality: object,
+    manifest: dict[str, Any],
+    expected_scope: dict[str, object],
+) -> list[str]:
     if not isinstance(quality, dict) or set(quality) != {
         "schema_version",
         "policy",
@@ -84,6 +88,7 @@ def phase5_quality_failures(quality: object, manifest: dict[str, Any]) -> list[s
         set(scope) != {"index_code", "start_date", "end_date"}
         or not all(isinstance(scope.get(key), str) for key in scope)
         or scope != manifest.get("scope")
+        or scope != expected_scope
     ):
         failures.append("quality_scope")
 
@@ -160,7 +165,15 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
     }
     expected_observations = summary.get("expected_observation_count")
     observed_observations = summary.get("observed_observation_count")
+    expected_security_count = summary.get("expected_security_count")
+    expected_industry_count = summary.get("expected_industry_count")
     reported_ratio = summary.get("temporal_coverage_ratio")
+    coverage_scope = manifest.get("coverage_scope")
+    coverage_minimum = (
+        coverage_scope.get("minimum_temporal_coverage")
+        if isinstance(coverage_scope, dict)
+        else None
+    )
     derived_ratio = (
         observed_observations / expected_observations
         if _nonnegative_int(expected_observations)
@@ -188,8 +201,17 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
         or any(not _nonnegative_int(summary.get(key)) for key in count_keys)
         or not _unit_number(summary.get("temporal_coverage_ratio"))
         or not _unit_number(summary.get("minimum_temporal_coverage"))
+        or summary.get("minimum_temporal_coverage") != coverage_minimum
+        or expected_industry_count
+        != expected_summary_counts["industry_definition_count"]
+        or observed_observations != expected_summary_counts["market_cap_count"]
         or summary.get("observed_observation_count", 0)
         > summary.get("expected_observation_count", 0)
+        or (
+            _nonnegative_int(expected_security_count)
+            and _nonnegative_int(expected_observations)
+            and expected_security_count > expected_observations
+        )
         or not isinstance(reported_ratio, (int, float))
         or isinstance(reported_ratio, bool)
         or abs(float(reported_ratio) - derived_ratio) > 1e-12

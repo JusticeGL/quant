@@ -270,6 +270,11 @@ def _validate_phase5_manifest_structure(
     research_config_path = config_dir / "research_data.yaml"
     _trusted_file(research_config_path, config_dir, "research data policy")
     config = load_research_data_config(config_dir)
+    expected_quality_scope: dict[str, object] = {
+        "index_code": config.index_code,
+        "start_date": config.start_date.isoformat(),
+        "end_date": config.end_date.isoformat(),
+    }
     identity = {
         "research_schema_version": 1,
         "config": config.model_dump(mode="json"),
@@ -290,6 +295,7 @@ def _validate_phase5_manifest_structure(
         manifest["quality_report"],
         manifest=manifest,
         snapshot_kind="phase5",
+        expected_scope=expected_quality_scope,
         expected_status=str(manifest["quality_status"]),
         expected_policy="phase5_point_in_time_quality_v1",
         label=label,
@@ -369,6 +375,7 @@ def _validate_exposure_manifest_structure(
         manifest["quality_report"],
         manifest=manifest,
         snapshot_kind="exposure",
+        expected_scope=None,
         expected_status="pass",
         expected_policy="phase6_exposure_quality_v1",
         label=label,
@@ -669,6 +676,7 @@ def _validate_quality_reference(
     *,
     manifest: dict[str, Any],
     snapshot_kind: str,
+    expected_scope: dict[str, object] | None,
     expected_status: str,
     expected_policy: str,
     label: str,
@@ -690,11 +698,12 @@ def _validate_quality_reference(
         or not isinstance(quality.get("checks"), dict)
     ):
         raise ValueError(f"{label} quality report schema is invalid")
-    failures = (
-        phase5_quality_failures(quality, manifest)
-        if snapshot_kind == "phase5"
-        else exposure_quality_failures(quality, manifest)
-    )
+    if snapshot_kind == "phase5":
+        if expected_scope is None:
+            raise ValueError(f"{label} expected quality scope is missing")
+        failures = phase5_quality_failures(quality, manifest, expected_scope)
+    else:
+        failures = exposure_quality_failures(quality, manifest)
     if failures:
         raise ValueError(f"{label} quality contract is invalid: {', '.join(failures)}")
     return quality

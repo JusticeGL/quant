@@ -447,6 +447,41 @@ def test_validation_rejects_quality_row_count_mismatch(tmp_path: Path) -> None:
     assert "quality_row_counts" in validation["failures"]
 
 
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "minimum_temporal_coverage",
+        "expected_industry_count",
+        "observed_observation_count",
+        "expected_security_count",
+    ],
+)
+def test_validation_rejects_detached_quality_coverage_summary(
+    tmp_path: Path, corruption: str
+) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    quality_path = tmp_path / manifest["quality_report"]["path"]
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    if corruption == "minimum_temporal_coverage":
+        quality["summary"][corruption] = 0.0
+    elif corruption == "expected_industry_count":
+        quality["summary"][corruption] = 999
+    elif corruption == "observed_observation_count":
+        quality["summary"][corruption] = 0
+        quality["summary"]["temporal_coverage_ratio"] = 0.0
+    else:
+        quality["summary"][corruption] = (
+            quality["summary"]["expected_observation_count"] + 1
+        )
+    _replace_quality(result.manifest_path, tmp_path, quality)
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_row_counts" in validation["failures"]
+
+
 def _materialize_fixture(tmp_path: Path):
     phase5_manifest = _phase5_fixture(tmp_path)
     config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
