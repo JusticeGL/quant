@@ -213,7 +213,7 @@ def validate_exposure_tables(
     expected_security_ids: set[str] | None = None,
     expected_industry_ids: set[str] | None = None,
     expected_market_observations: pd.DataFrame | None = None,
-    minimum_temporal_coverage: float = 1.0,
+    minimum_temporal_coverage: float | None = None,
 ) -> dict[str, object]:
     expected_security_ids = expected_security_ids or set(
         tables.market_cap.attrs.get("expected_security_ids", [])
@@ -230,11 +230,10 @@ def validate_exposure_tables(
             if isinstance(stored_observations, pd.DataFrame)
             else pd.DataFrame(columns=["trade_date", "security_id"])
         )
-    minimum_temporal_coverage = float(
-        tables.market_cap.attrs.get(
-            "minimum_temporal_coverage", minimum_temporal_coverage
+    if minimum_temporal_coverage is None:
+        minimum_temporal_coverage = float(
+            tables.market_cap.attrs.get("minimum_temporal_coverage", 1.0)
         )
-    )
     duplicate_count = sum(
         int(frame.duplicated(keys).sum())
         for frame, keys in (
@@ -537,13 +536,30 @@ def _provider_from_environment(
 def _load_phase5_tables(
     data_dir: Path, config: RobustnessConfig
 ) -> dict[str, pd.DataFrame]:
-    manifest_path = data_dir / "manifests" / config.phase5_snapshot_id / "manifest.json"
+    return _load_phase5_exposure_context(
+        data_dir,
+        config.phase5_snapshot_id,
+        config.warmup.start,
+        config.test.end,
+    )
+
+
+def _load_phase5_exposure_context(
+    data_dir: Path,
+    snapshot_id: str,
+    start_date: date,
+    end_date: date,
+) -> dict[str, pd.DataFrame]:
+    manifest_path = data_dir / "manifests" / snapshot_id / "manifest.json"
     if not manifest_path.is_file():
         raise ValueError(f"Phase 5 manifest is missing: {manifest_path}")
     import json
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("snapshot_id") != config.phase5_snapshot_id:
+    if (
+        manifest.get("snapshot_id") != snapshot_id
+        or manifest.get("snapshot_type") != "research_market"
+    ):
         raise ValueError("Phase 5 manifest identity mismatch")
     artifacts = {str(item["name"]): item for item in manifest.get("artifacts", [])}
     result: dict[str, pd.DataFrame] = {}
@@ -578,8 +594,8 @@ def _load_phase5_tables(
         observations["trade_date"], errors="raise"
     ).dt.normalize()
     observations = observations.loc[
-        (observations["trade_date"].dt.date >= config.warmup.start)
-        & (observations["trade_date"].dt.date <= config.test.end)
+        (observations["trade_date"].dt.date >= start_date)
+        & (observations["trade_date"].dt.date <= end_date)
     ]
     result["observations"] = observations.sort_values(
         ["trade_date", "security_id"], kind="stable"

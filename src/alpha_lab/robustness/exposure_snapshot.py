@@ -8,6 +8,7 @@ import tempfile
 import uuid
 from collections.abc import Sequence
 from dataclasses import asdict
+from datetime import date
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,6 +21,7 @@ from alpha_lab.research_data.provider import TushareArtifact
 from alpha_lab.robustness.config import RobustnessConfig, load_robustness_config
 from alpha_lab.robustness.contracts import ExposureSnapshotResult, ExposureTables
 from alpha_lab.robustness.exposure_data import (
+    _load_phase5_exposure_context,
     _provider_from_environment,
     acquire_exposure_tables,
     validate_exposure_tables,
@@ -53,9 +55,26 @@ def materialize_exposure_snapshot(
     tables: ExposureTables,
     raw_inputs: Sequence[TushareArtifact],
 ) -> ExposureSnapshotResult:
-    phase5_manifest = _read_phase5_manifest(phase5_manifest_path, config)
-    known_security_ids = _known_security_ids(data_dir, phase5_manifest)
-    quality = validate_exposure_tables(tables, known_security_ids)
+    _read_phase5_manifest(phase5_manifest_path, config)
+    phase5_context = _load_phase5_exposure_context(
+        data_dir,
+        config.phase5_snapshot_id,
+        config.warmup.start,
+        config.test.end,
+    )
+    known_security_ids = set(phase5_context["security"]["security_id"].astype(str))
+    expected_security_ids = set(
+        phase5_context["observations"]["security_id"].astype(str)
+    )
+    expected_industry_ids = set(tables.industry_definition["industry_id"].astype(str))
+    quality = validate_exposure_tables(
+        tables,
+        known_security_ids,
+        expected_security_ids=expected_security_ids,
+        expected_industry_ids=expected_industry_ids,
+        expected_market_observations=phase5_context["observations"],
+        minimum_temporal_coverage=config.minimum_fold_coverage,
+    )
     if quality["status"] == "error":
         raise ValueError("exposure data quality gates failed")
 
@@ -73,11 +92,17 @@ def materialize_exposure_snapshot(
             )
         ]
         phase5_sha256 = file_sha256(phase5_manifest_path)
+        coverage_scope = {
+            "start_date": config.warmup.start.isoformat(),
+            "end_date": config.test.end.isoformat(),
+            "minimum_temporal_coverage": config.minimum_fold_coverage,
+        }
         identity = {
             "exposure_schema_version": EXPOSURE_SCHEMA_VERSION,
             "phase5_manifest_sha256": phase5_sha256,
             "policy_sha256": policy_sha256,
             "quality_report_sha256": quality_sha256,
+            "coverage_scope": coverage_scope,
             "raw_request_identities": raw_identities,
             "artifacts": [
                 {
@@ -118,6 +143,7 @@ def materialize_exposure_snapshot(
             "phase5_manifest_sha256": phase5_sha256,
             "policy_sha256": policy_sha256,
             "quality_status": quality["status"],
+            "coverage_scope": coverage_scope,
             "source": {
                 "provider": "tushare",
                 "classification_standard": "SW2021",
@@ -187,6 +213,7 @@ def validate_exposure_snapshot(data_dir: Path, snapshot_id: str) -> dict[str, ob
             if isinstance(quality_reference, dict)
             else None
         ),
+        "coverage_scope": manifest.get("coverage_scope"),
         "raw_request_identities": [
             {
                 key: item.get(key)
@@ -237,6 +264,15 @@ def validate_exposure_snapshot(data_dir: Path, snapshot_id: str) -> dict[str, ob
                 failures.append("quality_schema")
             else:
                 failures.extend(_quality_report_failures(quality_document, manifest))
+                try:
+                    recomputed_quality = _recompute_quality_report(data_dir, manifest)
+                except (KeyError, TypeError, ValueError, OSError):
+                    failures.append("quality_recomputed")
+                else:
+                    if _canonical_bytes(recomputed_quality) != _canonical_bytes(
+                        quality_document
+                    ):
+                        failures.append("quality_recomputed")
     return {
         "snapshot_id": snapshot_id,
         "healthy": not failures and manifest.get("quality_status") != "error",
@@ -284,6 +320,68 @@ def _write_tables(root: Path, tables: ExposureTables) -> list[dict[str, object]]
         )
     )
     return sorted(artifacts, key=lambda item: str(item["name"]))
+
+
+def _recompute_quality_report(
+    data_dir: Path, manifest: dict[str, Any]
+) -> dict[str, object]:
+    scope = manifest.get("coverage_scope")
+    if not isinstance(scope, dict) or set(scope) != {
+        "start_date",
+        "end_date",
+        "minimum_temporal_coverage",
+    }:
+        raise ValueError("invalid coverage scope")
+    start_date = date.fromisoformat(str(scope["start_date"]))
+    end_date = date.fromisoformat(str(scope["end_date"]))
+    threshold = float(scope["minimum_temporal_coverage"])
+    if threshold != 0.70 or end_date < start_date:
+        raise ValueError("invalid coverage policy")
+    phase5_snapshot_id = manifest.get("phase5_snapshot_id")
+    if not isinstance(phase5_snapshot_id, str):
+        raise ValueError("invalid Phase 5 snapshot")
+    context = _load_phase5_exposure_context(
+        data_dir, phase5_snapshot_id, start_date, end_date
+    )
+    artifacts = {
+        str(item["name"]): item
+        for item in manifest.get("artifacts", [])
+        if isinstance(item, dict) and "name" in item
+    }
+    market_parts = [
+        _read_verified_frame(data_dir, item)
+        for name, item in sorted(artifacts.items())
+        if name.startswith("market_cap/")
+    ]
+    if not market_parts:
+        raise ValueError("market cap artifacts are missing")
+    definitions = _read_verified_frame(
+        data_dir, artifacts["industry_definition.parquet"]
+    )
+    membership = _read_verified_frame(
+        data_dir, artifacts["industry_membership.parquet"]
+    )
+    tables = ExposureTables(
+        market_cap=pd.concat(market_parts, ignore_index=True),
+        industry_definition=definitions,
+        industry_membership=membership,
+    )
+    observations = context["observations"]
+    return validate_exposure_tables(
+        tables,
+        set(context["security"]["security_id"].astype(str)),
+        expected_security_ids=set(observations["security_id"].astype(str)),
+        expected_industry_ids=set(definitions["industry_id"].astype(str)),
+        expected_market_observations=observations,
+        minimum_temporal_coverage=threshold,
+    )
+
+
+def _read_verified_frame(data_dir: Path, artifact: dict[str, Any]) -> pd.DataFrame:
+    path = data_dir / str(artifact["path"])
+    if not path.is_file() or file_sha256(path) != str(artifact["sha256"]):
+        raise ValueError("artifact checksum mismatch")
+    return pd.read_parquet(path)
 
 
 def _phase5_dependency_failures(

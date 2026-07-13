@@ -280,6 +280,7 @@ def test_phase5_membership_checksum_is_verified(tmp_path: Path) -> None:
     manifest_dir.mkdir(parents=True)
     manifest = {
         "snapshot_id": config.phase5_snapshot_id,
+        "snapshot_type": "research_market",
         "artifacts": [
             {
                 "name": path.relative_to(snapshot).as_posix(),

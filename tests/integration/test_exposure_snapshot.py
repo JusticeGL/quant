@@ -14,6 +14,7 @@ from alpha_lab.robustness.exposure_data import (
     normalize_industry_definition,
     normalize_industry_membership,
     normalize_market_cap,
+    validate_exposure_tables,
 )
 from alpha_lab.robustness.exposure_snapshot import (
     materialize_exposure_snapshot,
@@ -86,6 +87,59 @@ def test_exposure_snapshot_refuses_quality_error_without_publishing_pointer(
         )
 
     assert not (tmp_path / "state" / "latest_exposure_snapshot.txt").exists()
+
+
+def test_materialization_rebuilds_coverage_when_dataframe_attrs_are_lost(
+    tmp_path: Path,
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    sparse = _attr_free_sparse_tables()
+
+    with pytest.raises(ValueError, match="quality"):
+        materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            sparse,
+            [_raw_input(tmp_path)],
+        )
+
+    assert not (tmp_path / "state" / "latest_exposure_snapshot.txt").exists()
+
+
+def test_snapshot_validation_recomputes_attr_free_sparse_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    sparse = _attr_free_sparse_tables()
+    legacy_quality = validate_exposure_tables(sparse, {"CN:SSE:600000"})
+    assert legacy_quality["status"] == "pass"
+    assert legacy_quality["summary"]["expected_observation_count"] == 0
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            "alpha_lab.robustness.exposure_snapshot.validate_exposure_tables",
+            lambda *args, **kwargs: legacy_quality,
+        )
+        patcher.setattr(
+            "alpha_lab.robustness.exposure_snapshot.validate_exposure_snapshot",
+            lambda *_: {"healthy": True, "failures": []},
+        )
+        result = materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            sparse,
+            [_raw_input(tmp_path)],
+        )
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_recomputed" in validation["failures"]
 
 
 def test_validation_rejects_manifest_identity_tampering(tmp_path: Path) -> None:
@@ -250,6 +304,17 @@ def _tables() -> ExposureTables:
             membership, set(definitions["source_index_code"])
         ),
     )
+
+
+def _attr_free_sparse_tables() -> ExposureTables:
+    complete = _tables()
+    market = complete.market_cap.iloc[:1].copy()
+    definition = complete.industry_definition.copy()
+    membership = complete.industry_membership.copy()
+    market.attrs = {}
+    definition.attrs = {}
+    membership.attrs = {}
+    return ExposureTables(market, definition, membership)
 
 
 def _phase5_fixture(tmp_path: Path) -> Path:
