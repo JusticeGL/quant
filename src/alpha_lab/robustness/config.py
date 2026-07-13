@@ -62,6 +62,8 @@ class RobustnessConfig(StrictModel):
 
     @model_validator(mode="after")
     def validate_locked_policy(self) -> RobustnessConfig:
+        if self.test.start != date(2026, 1, 1) or self.test.end != date(2026, 7, 11):
+            raise ValueError("Phase 6 locked test range must remain fixed")
         if self.factor_ids != ["F1002", "F1003"]:
             raise ValueError("Phase 6 candidates must be F1002 and F1003")
         if self.cost_multipliers != [0.5, 1.0, 1.5, 2.0]:

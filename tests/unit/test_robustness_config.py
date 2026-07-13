@@ -61,6 +61,20 @@ def test_phase6_policy_rejects_fold_overlap_with_test() -> None:
         RobustnessConfig.model_validate(document)
 
 
+@pytest.mark.parametrize(
+    ("boundary", "value"),
+    [("start", "2026-01-02"), ("end", "2027-07-11")],
+)
+def test_phase6_policy_rejects_locked_test_boundary_drift(
+    boundary: str, value: str
+) -> None:
+    document = yaml.safe_load((ROOT / "config" / "robustness.yaml").read_text())
+    document["test"][boundary] = value
+
+    with pytest.raises(ValueError, match="locked test range"):
+        RobustnessConfig.model_validate(document)
+
+
 def test_phase6_policy_hashes_validated_canonical_content() -> None:
     config, digest = load_robustness_config(ROOT / "config" / "robustness.yaml")
     canonical = json.dumps(
