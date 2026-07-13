@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -242,6 +243,7 @@ def validate_exposure_snapshot(data_dir: Path, snapshot_id: str) -> dict[str, ob
     ):
         failures.append("identity_sha256")
     failures.extend(_phase5_dependency_failures(data_dir, manifest))
+    failures.extend(_artifact_layout_failures(data_dir, manifest))
     for item in [*manifest.get("raw_inputs", []), *manifest.get("artifacts", [])]:
         path = data_dir / str(item["path"])
         checked += 1
@@ -322,6 +324,73 @@ def _write_tables(root: Path, tables: ExposureTables) -> list[dict[str, object]]
         )
     )
     return sorted(artifacts, key=lambda item: str(item["name"]))
+
+
+def _artifact_layout_failures(data_dir: Path, manifest: dict[str, Any]) -> list[str]:
+    try:
+        scope = manifest["coverage_scope"]
+        start_date = date.fromisoformat(str(scope["start_date"]))
+        end_date = date.fromisoformat(str(scope["end_date"]))
+        snapshot_id = str(manifest["snapshot_id"])
+        phase5_snapshot_id = str(manifest["phase5_snapshot_id"])
+        artifacts = manifest["artifacts"]
+        if not isinstance(artifacts, list) or not all(
+            isinstance(item, dict) for item in artifacts
+        ):
+            raise ValueError("invalid artifacts")
+        names = [str(item["name"]) for item in artifacts]
+        if len(names) != len(set(names)):
+            raise ValueError("duplicate artifacts")
+        for fixed_name in (
+            "industry_definition.parquet",
+            "industry_membership.parquet",
+        ):
+            if names.count(fixed_name) != 1:
+                raise ValueError("missing fixed artifact")
+        market_pattern = re.compile(r"^market_cap/year=([0-9]{4})/part[.]parquet$")
+        market_items: list[tuple[int, dict[str, Any]]] = []
+        for item, name in zip(artifacts, names, strict=True):
+            expected_path = (Path("exposures") / snapshot_id / name).as_posix()
+            if item.get("path") != expected_path:
+                raise ValueError("artifact path mismatch")
+            if name.startswith("market_cap/"):
+                matched = market_pattern.fullmatch(name)
+                if matched is None:
+                    raise ValueError("invalid market partition grammar")
+                year = int(matched.group(1))
+                if year < start_date.year or year > end_date.year:
+                    raise ValueError("market partition outside scope")
+                market_items.append((year, item))
+        if not market_items or len({year for year, _ in market_items}) != len(
+            market_items
+        ):
+            raise ValueError("duplicate or missing market partition")
+        context = _load_phase5_exposure_context(
+            data_dir, phase5_snapshot_id, start_date, end_date
+        )
+        expected_years = set(
+            pd.to_datetime(
+                context["observations"]["trade_date"], errors="raise"
+            ).dt.year
+        )
+        if {year for year, _ in market_items} != expected_years:
+            raise ValueError("market partition years are incomplete")
+        for year, item in market_items:
+            frame = _read_verified_frame(data_dir, item)
+            row_years = set(pd.to_datetime(frame["trade_date"], errors="raise").dt.year)
+            if row_years != {year}:
+                raise ValueError("market row year mismatches partition")
+        snapshot_dir = data_dir / "exposures" / snapshot_id
+        actual_files = {
+            path.relative_to(snapshot_dir).as_posix()
+            for path in snapshot_dir.rglob("*")
+            if path.is_file()
+        }
+        if actual_files != set(names):
+            raise ValueError("snapshot directory is not manifest-closed")
+    except (KeyError, TypeError, ValueError, OSError):
+        return ["artifact_layout"]
+    return []
 
 
 def _recompute_quality_report(

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from alpha_lab.research_data.provider import TushareArtifact
+from alpha_lab.robustness import exposure_snapshot
 from alpha_lab.robustness.config import load_robustness_config
 from alpha_lab.robustness.contracts import ExposureTables
 from alpha_lab.robustness.exposure_data import (
@@ -217,6 +219,63 @@ def test_snapshot_validation_reads_and_rejects_extra_2027_partition(
 
     assert validation["healthy"] is False
     assert "quality_recomputed" in validation["failures"]
+
+
+@pytest.mark.parametrize(("source_year", "wrong_year"), [(2021, 2019), (2026, 2027)])
+def test_materialization_rejects_declared_mislabeled_market_partition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_year: int,
+    wrong_year: int,
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    original_write_tables = exposure_snapshot._write_tables
+
+    def mislabeled_write(root: Path, tables: ExposureTables):
+        artifacts = original_write_tables(root, tables)
+        source_name = f"market_cap/year={source_year}/part.parquet"
+        target_name = f"market_cap/year={wrong_year}/part.parquet"
+        source = root / source_name
+        target = root / target_name
+        target.parent.mkdir(parents=True)
+        source.replace(target)
+        source.parent.rmdir()
+        for artifact in artifacts:
+            if artifact["name"] == source_name:
+                artifact["name"] = target_name
+        return artifacts
+
+    monkeypatch.setattr(exposure_snapshot, "_write_tables", mislabeled_write)
+
+    with pytest.raises(ValueError, match="validation"):
+        materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            _tables(),
+            [_raw_input(tmp_path)],
+        )
+
+    assert not (tmp_path / "state" / "latest_exposure_snapshot.txt").exists()
+
+
+@pytest.mark.parametrize("extra_year", [2019, 2027])
+def test_validation_rejects_undeclared_extra_market_partition(
+    tmp_path: Path, extra_year: int
+) -> None:
+    result = _materialize_fixture(tmp_path)
+    source_year = 2021 if extra_year == 2019 else 2026
+    source = result.snapshot_dir / f"market_cap/year={source_year}/part.parquet"
+    extra = result.snapshot_dir / f"market_cap/year={extra_year}/part.parquet"
+    extra.parent.mkdir(parents=True)
+    shutil.copyfile(source, extra)
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "artifact_layout" in validation["failures"]
 
 
 def test_validation_rejects_manifest_identity_tampering(tmp_path: Path) -> None:
