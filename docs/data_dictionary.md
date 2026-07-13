@@ -84,4 +84,9 @@ SHA256。
 Catalog 同步在 Task 2 验证后记录 manifest SHA256，并在 DuckDB 写锁与
 事务内重读 manifest、比较 SHA256，然后对 market-cap、raw、quality、
 industry 与必需 Phase 5 依赖的当前文件字节逐一重算 SHA256。登记的
-是实算值；验证后篡改、路径逃逸或中途异常均使整个同步事务回滚。
+是实算值。Phase 5 小型引用表、质量报告与行业表使用同一次读取所得的
+bytes 完成哈希与解析；写完 latest-state 后，`COMMIT` 前最后一次封口会
+重算两份 canonical manifest 及全部 exposure/raw/quality/industry/Phase 5
+依赖。封口发现验证后篡改、路径逃逸或中途异常时，整个同步事务回滚。
+Catalog 写锁不能约束不配合的外部文件写入者，只能在提交前封口时发现其
+漂移；因此 `data/raw` 必须保持 immutable、append-only，快照依赖不得覆盖。

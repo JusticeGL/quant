@@ -106,10 +106,22 @@ registration. Only after those checks does it register the Phase 5 parent and
 artifacts and bulk insert industry definitions/membership with
 `INSERT ... SELECT ... ON CONFLICT`.
 
+Small Phase 5 reference artifacts, their quality report and Phase 6 industry
+artifacts are hashed and parsed from the same in-memory byte buffer, so derived
+catalog rows cannot come from bytes different from the verified digest. After
+all catalog rows and the latest-state pointer are written, the final fallible
+business operation before `COMMIT` re-hashes both canonical manifests and every
+exposure, raw, quality, industry and Phase 5 dependency. Any drift rolls back
+the transaction.
+
 Repeating the same sync is idempotent. Post-validation mutation, artifact paths
 outside `data_dir`, hash drift and unknown references are rejected. Any failure
 rolls back Phase 5/exposure rows and the latest-state update together. No daily
-market-cap rows are copied into DuckDB.
+market-cap rows are copied into DuckDB. The catalog lock coordinates catalog
+writers; a non-cooperating external file writer is detected when the pre-commit
+seal observes its change, but cannot be serialized by that lock. Operationally,
+`data/raw` remains immutable and append-only, and snapshot dependencies must not
+be overwritten.
 
 The normalized state tables are:
 

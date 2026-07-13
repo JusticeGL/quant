@@ -337,6 +337,135 @@ def test_exposure_sync_rolls_back_a_forced_mid_transaction_failure(
     assert _transactional_catalog_counts(database_path) == (0, 0, 0, 0)
 
 
+@pytest.mark.parametrize("target", ["market_cap", "raw", "quality", "industry"])
+def test_exposure_sync_final_seal_rejects_tamper_after_artifact_upsert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    data_dir = tmp_path / "data"
+    exposure = _materialize_exposure_fixture(data_dir)
+    database_path = data_dir / "metadata.duckdb"
+    target_path = _post_validation_target(data_dir, exposure.manifest_path, target)
+    target_relative_path = target_path.relative_to(data_dir).as_posix()
+    real_upsert = catalog._upsert_artifact
+    tampered = False
+
+    def upsert_then_tamper(*args: object, **kwargs: object) -> str:
+        nonlocal tampered
+        artifact_id = real_upsert(*args, **kwargs)
+        if not tampered and kwargs["relative_path"] == target_relative_path:
+            if target == "market_cap":
+                frame = pd.read_parquet(target_path)
+                frame.to_parquet(target_path, index=False, compression="gzip")
+            else:
+                target_path.write_bytes(target_path.read_bytes() + b" ")
+            tampered = True
+        return artifact_id
+
+    monkeypatch.setattr(catalog, "_upsert_artifact", upsert_then_tamper)
+
+    with pytest.raises(ValueError, match="final catalog seal"):
+        catalog.sync_exposure_snapshot(database_path, data_dir, exposure.manifest_path)
+
+    assert tampered
+    assert _all_transactional_catalog_counts(database_path) == (0,) * 8
+
+
+def test_exposure_sync_uses_verified_phase5_bytes_after_artifact_upsert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    exposure = _materialize_exposure_fixture(data_dir)
+    database_path = data_dir / "metadata.duckdb"
+    security_path = _post_validation_target(data_dir, exposure.manifest_path, "phase5")
+    security_relative_path = security_path.relative_to(data_dir).as_posix()
+    real_upsert = catalog._upsert_artifact
+    real_sync = catalog._sync_research_securities
+    tampered = False
+    derived_names: list[str] = []
+
+    def upsert_then_tamper(*args: object, **kwargs: object) -> str:
+        nonlocal tampered
+        artifact_id = real_upsert(*args, **kwargs)
+        if not tampered and kwargs["relative_path"] == security_relative_path:
+            frame = pd.read_parquet(security_path)
+            frame.loc[0, "name"] = "篡改证券"
+            frame.to_parquet(security_path, index=False, compression="gzip")
+            tampered = True
+        return artifact_id
+
+    def capture_verified_frame(*args: object, **kwargs: object) -> None:
+        frame = args[1]
+        assert isinstance(frame, pd.DataFrame)
+        derived_names.extend(frame["name"].astype(str).tolist())
+        real_sync(*args, **kwargs)
+
+    monkeypatch.setattr(catalog, "_upsert_artifact", upsert_then_tamper)
+    monkeypatch.setattr(catalog, "_sync_research_securities", capture_verified_frame)
+
+    with pytest.raises(ValueError, match="final catalog seal"):
+        catalog.sync_exposure_snapshot(database_path, data_dir, exposure.manifest_path)
+
+    assert tampered
+    assert derived_names == ["浦发银行"]
+    assert _all_transactional_catalog_counts(database_path) == (0,) * 8
+
+
+def test_exposure_sync_final_seal_rejects_tamper_after_phase5_derived_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    exposure = _materialize_exposure_fixture(data_dir)
+    database_path = data_dir / "metadata.duckdb"
+    security_path = _post_validation_target(data_dir, exposure.manifest_path, "phase5")
+    real_sync = catalog._sync_research_securities
+    tampered = False
+
+    def sync_then_tamper(*args: object, **kwargs: object) -> None:
+        nonlocal tampered
+        real_sync(*args, **kwargs)
+        frame = pd.read_parquet(security_path)
+        frame.loc[0, "name"] = "派生后篡改"
+        frame.to_parquet(security_path, index=False, compression="gzip")
+        tampered = True
+
+    monkeypatch.setattr(catalog, "_sync_research_securities", sync_then_tamper)
+
+    with pytest.raises(ValueError, match="final catalog seal"):
+        catalog.sync_exposure_snapshot(database_path, data_dir, exposure.manifest_path)
+
+    assert tampered
+    assert _all_transactional_catalog_counts(database_path) == (0,) * 8
+
+
+def test_exposure_sync_final_seal_is_after_all_catalog_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_dir = tmp_path / "data"
+    exposure = _materialize_exposure_fixture(data_dir)
+    database_path = data_dir / "metadata.duckdb"
+    real_sync = catalog._sync_exposure_manifest
+    tampered = False
+
+    def sync_then_tamper(*args: object, **kwargs: object) -> None:
+        nonlocal tampered
+        real_sync(*args, **kwargs)
+        exposure.manifest_path.write_bytes(exposure.manifest_path.read_bytes() + b" ")
+        tampered = True
+
+    monkeypatch.setattr(catalog, "_sync_exposure_manifest", sync_then_tamper)
+
+    with pytest.raises(ValueError, match="final catalog seal"):
+        catalog.sync_exposure_snapshot(database_path, data_dir, exposure.manifest_path)
+
+    assert tampered
+    assert _all_transactional_catalog_counts(database_path) == (0,) * 8
+
+
 def test_exposure_snapshot_sync_rejects_detached_manifest_reference(
     tmp_path: Path,
 ) -> None:
@@ -517,6 +646,24 @@ def _transactional_catalog_counts(database_path: Path) -> tuple[int, ...]:
                 (SELECT count(*) FROM meta.dataset_snapshot),
                 (SELECT count(*) FROM ref.security),
                 (SELECT count(*) FROM meta.artifact),
+                (SELECT count(*) FROM meta.repository_state
+                 WHERE key = 'latest_exposure_snapshot_id')
+            """
+        ).fetchone()
+
+
+def _all_transactional_catalog_counts(database_path: Path) -> tuple[int, ...]:
+    with duckdb.connect(str(database_path), read_only=True) as connection:
+        return connection.execute(
+            """
+            SELECT
+                (SELECT count(*) FROM meta.dataset_snapshot),
+                (SELECT count(*) FROM ref.security),
+                (SELECT count(*) FROM ref.security_identifier_history),
+                (SELECT count(*) FROM ref.industry_definition),
+                (SELECT count(*) FROM ref.industry_membership_history),
+                (SELECT count(*) FROM meta.artifact),
+                (SELECT count(*) FROM meta.quality_result),
                 (SELECT count(*) FROM meta.repository_state
                  WHERE key = 'latest_exposure_snapshot_id')
             """
