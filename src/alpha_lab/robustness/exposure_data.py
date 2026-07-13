@@ -214,6 +214,8 @@ def validate_exposure_tables(
     expected_industry_ids: set[str] | None = None,
     expected_market_observations: pd.DataFrame | None = None,
     minimum_temporal_coverage: float | None = None,
+    market_start_date: date | None = None,
+    market_end_date: date | None = None,
 ) -> dict[str, object]:
     expected_security_ids = expected_security_ids or set(
         tables.market_cap.attrs.get("expected_security_ids", [])
@@ -267,6 +269,15 @@ def validate_exposure_tables(
         columns=["total_market_cap_cny", "float_market_cap_cny"]
     ).apply(pd.to_numeric, errors="coerce")
     invalid_cap = int((cap.isna() | ~np.isfinite(cap) | (cap <= 0)).sum().sum())
+    market_dates = pd.to_datetime(
+        tables.market_cap.get("trade_date", pd.Series(dtype="datetime64[ns]")),
+        errors="coerce",
+    )
+    out_of_scope_market_cap = 0
+    if market_start_date is not None:
+        out_of_scope_market_cap += int((market_dates.dt.date < market_start_date).sum())
+    if market_end_date is not None:
+        out_of_scope_market_cap += int((market_dates.dt.date > market_end_date).sum())
     observed_security_ids = set(tables.market_cap.get("security_id", []))
     observed_industry_ids = set(tables.industry_membership.get("industry_id", []))
     missing_security_coverage = len(expected_security_ids - observed_security_ids)
@@ -322,6 +333,7 @@ def validate_exposure_tables(
             insufficient_temporal_coverage
         ),
         "undercovered_security": _quality_check(undercovered_security),
+        "market_cap_out_of_scope": _quality_check(out_of_scope_market_cap),
     }
     status = "error" if any(item["count"] for item in checks.values()) else "pass"
     return {
@@ -503,6 +515,8 @@ def acquire_exposure_tables(
         expected_industry_ids=expected_industry_ids,
         expected_market_observations=phase5["observations"],
         minimum_temporal_coverage=config.minimum_fold_coverage,
+        market_start_date=config.warmup.start,
+        market_end_date=config.test.end,
     )
     if quality["status"] == "error":
         raise ValueError("exposure acquisition coverage gates failed")

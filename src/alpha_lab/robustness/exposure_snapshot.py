@@ -74,6 +74,8 @@ def materialize_exposure_snapshot(
         expected_industry_ids=expected_industry_ids,
         expected_market_observations=phase5_context["observations"],
         minimum_temporal_coverage=config.minimum_fold_coverage,
+        market_start_date=config.warmup.start,
+        market_end_date=config.test.end,
     )
     if quality["status"] == "error":
         raise ValueError("exposure data quality gates failed")
@@ -374,6 +376,8 @@ def _recompute_quality_report(
         expected_industry_ids=set(definitions["industry_id"].astype(str)),
         expected_market_observations=observations,
         minimum_temporal_coverage=threshold,
+        market_start_date=start_date,
+        market_end_date=end_date,
     )
 
 
@@ -471,6 +475,7 @@ def _quality_report_failures(quality: object, manifest: dict[str, Any]) -> list[
         "missing_industry_coverage",
         "insufficient_temporal_coverage",
         "undercovered_security",
+        "market_cap_out_of_scope",
     }
     checks = quality["checks"]
     check_failure = set(checks) != expected_checks

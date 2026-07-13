@@ -142,6 +142,83 @@ def test_snapshot_validation_recomputes_attr_free_sparse_coverage(
     assert "quality_recomputed" in validation["failures"]
 
 
+@pytest.mark.parametrize("trade_date", ["2019-12-31", "2027-01-04"])
+def test_materialization_rejects_market_cap_outside_coverage_scope(
+    tmp_path: Path, trade_date: str
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    tables = _out_of_scope_tables(trade_date)
+
+    with pytest.raises(ValueError, match="quality"):
+        materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            tables,
+            [_raw_input(tmp_path)],
+        )
+
+    assert not (tmp_path / "state" / "latest_exposure_snapshot.txt").exists()
+
+
+def test_snapshot_validation_reads_and_rejects_extra_2027_partition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    tables = _out_of_scope_tables("2027-01-04")
+    expected = pd.DataFrame(
+        [
+            {
+                "trade_date": pd.Timestamp("2021-01-04"),
+                "security_id": "CN:SSE:600000",
+            },
+            {
+                "trade_date": pd.Timestamp("2026-07-10"),
+                "security_id": "CN:SSE:600000",
+            },
+        ]
+    )
+    legacy_quality = validate_exposure_tables(
+        tables,
+        {"CN:SSE:600000"},
+        expected_security_ids={"CN:SSE:600000"},
+        expected_industry_ids={"CN:SW2021:801010.SI"},
+        expected_market_observations=expected,
+        minimum_temporal_coverage=0.70,
+    )
+    assert legacy_quality["status"] == "pass"
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            "alpha_lab.robustness.exposure_snapshot.validate_exposure_tables",
+            lambda *args, **kwargs: legacy_quality,
+        )
+        patcher.setattr(
+            "alpha_lab.robustness.exposure_snapshot.validate_exposure_snapshot",
+            lambda *_: {"healthy": True, "failures": []},
+        )
+        result = materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            tables,
+            [_raw_input(tmp_path)],
+        )
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert any(
+        item["name"] == "market_cap/year=2027/part.parquet"
+        for item in manifest["artifacts"]
+    )
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_recomputed" in validation["failures"]
+
+
 def test_validation_rejects_manifest_identity_tampering(tmp_path: Path) -> None:
     result = _materialize_fixture(tmp_path)
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
@@ -315,6 +392,23 @@ def _attr_free_sparse_tables() -> ExposureTables:
     definition.attrs = {}
     membership.attrs = {}
     return ExposureTables(market, definition, membership)
+
+
+def _out_of_scope_tables(trade_date: str) -> ExposureTables:
+    complete = _tables()
+    extra = normalize_market_cap(
+        pd.DataFrame(
+            [["600000.SH", trade_date.replace("-", ""), 140.0, 120.0]],
+            columns=["ts_code", "trade_date", "total_mv", "circ_mv"],
+        )
+    )
+    market = pd.concat([complete.market_cap, extra], ignore_index=True)
+    market.attrs = {}
+    return ExposureTables(
+        market,
+        complete.industry_definition.copy(),
+        complete.industry_membership.copy(),
+    )
 
 
 def _phase5_fixture(tmp_path: Path) -> Path:
