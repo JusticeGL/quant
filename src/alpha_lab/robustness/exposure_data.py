@@ -60,6 +60,8 @@ def normalize_market_cap(
     *,
     row_limit: int = DAILY_BASIC_ROW_LIMIT,
     expected_ts_code: str | None = None,
+    expected_start_date: date | None = None,
+    expected_end_date: date | None = None,
 ) -> pd.DataFrame:
     _require_fields(raw, DAILY_BASIC_FIELDS, "daily_basic")
     _reject_row_limit(raw, row_limit, "daily_basic")
@@ -84,6 +86,16 @@ def normalize_market_cap(
             * 10_000.0,
         }
     )
+    if (
+        expected_start_date is not None
+        and (frame["trade_date"].dt.date < expected_start_date).any()
+    ):
+        raise ValueError("daily_basic response precedes requested start_date")
+    if (
+        expected_end_date is not None
+        and (frame["trade_date"].dt.date > expected_end_date).any()
+    ):
+        raise ValueError("daily_basic response exceeds requested end_date")
     numeric = frame[["total_market_cap_cny", "float_market_cap_cny"]]
     if numeric.isna().any().any() or (~np.isfinite(numeric)).any().any():
         raise ValueError("daily_basic market cap must be finite")
@@ -200,12 +212,28 @@ def validate_exposure_tables(
     *,
     expected_security_ids: set[str] | None = None,
     expected_industry_ids: set[str] | None = None,
+    expected_market_observations: pd.DataFrame | None = None,
+    minimum_temporal_coverage: float = 1.0,
 ) -> dict[str, object]:
     expected_security_ids = expected_security_ids or set(
         tables.market_cap.attrs.get("expected_security_ids", [])
     )
     expected_industry_ids = expected_industry_ids or set(
         tables.industry_membership.attrs.get("expected_industry_ids", [])
+    )
+    if expected_market_observations is None:
+        stored_observations = tables.market_cap.attrs.get(
+            "expected_market_observations"
+        )
+        expected_market_observations = (
+            stored_observations
+            if isinstance(stored_observations, pd.DataFrame)
+            else pd.DataFrame(columns=["trade_date", "security_id"])
+        )
+    minimum_temporal_coverage = float(
+        tables.market_cap.attrs.get(
+            "minimum_temporal_coverage", minimum_temporal_coverage
+        )
     )
     duplicate_count = sum(
         int(frame.duplicated(keys).sum())
@@ -244,6 +272,35 @@ def validate_exposure_tables(
     observed_industry_ids = set(tables.industry_membership.get("industry_id", []))
     missing_security_coverage = len(expected_security_ids - observed_security_ids)
     missing_industry_coverage = len(expected_industry_ids - observed_industry_ids)
+    expected_keys = _observation_keys(expected_market_observations)
+    observed_keys = _observation_keys(tables.market_cap)
+    covered_keys = expected_keys & observed_keys
+    expected_observation_count = len(expected_keys)
+    observed_observation_count = len(covered_keys)
+    temporal_coverage_ratio = (
+        observed_observation_count / expected_observation_count
+        if expected_observation_count
+        else 1.0
+    )
+    missing_observations = expected_observation_count - observed_observation_count
+    insufficient_temporal_coverage = (
+        missing_observations
+        if temporal_coverage_ratio < minimum_temporal_coverage
+        else 0
+    )
+    expected_by_security: dict[str, int] = {}
+    covered_by_security: dict[str, int] = {}
+    for trade_date, security_id in expected_keys:
+        expected_by_security[security_id] = expected_by_security.get(security_id, 0) + 1
+        if (trade_date, security_id) in covered_keys:
+            covered_by_security[security_id] = (
+                covered_by_security.get(security_id, 0) + 1
+            )
+    undercovered_security = sum(
+        covered_by_security.get(security_id, 0) / expected_count
+        < minimum_temporal_coverage
+        for security_id, expected_count in expected_by_security.items()
+    )
     checks = {
         "empty_required_table": _quality_check(
             sum(
@@ -262,6 +319,10 @@ def validate_exposure_tables(
         "invalid_market_cap": _quality_check(invalid_cap),
         "missing_security_coverage": _quality_check(missing_security_coverage),
         "missing_industry_coverage": _quality_check(missing_industry_coverage),
+        "insufficient_temporal_coverage": _quality_check(
+            insufficient_temporal_coverage
+        ),
+        "undercovered_security": _quality_check(undercovered_security),
     }
     status = "error" if any(item["count"] for item in checks.values()) else "pass"
     return {
@@ -274,6 +335,10 @@ def validate_exposure_tables(
             "industry_membership_count": len(tables.industry_membership),
             "expected_security_count": len(expected_security_ids),
             "expected_industry_count": len(expected_industry_ids),
+            "expected_observation_count": expected_observation_count,
+            "observed_observation_count": observed_observation_count,
+            "temporal_coverage_ratio": round(temporal_coverage_ratio, 12),
+            "minimum_temporal_coverage": minimum_temporal_coverage,
         },
         "checks": checks,
     }
@@ -283,9 +348,8 @@ def probe_exposure_capabilities(config_dir: Path, data_dir: Path) -> dict[str, o
     config, _ = load_robustness_config(config_dir / "robustness.yaml")
     provider = _provider_from_environment(data_dir, config)
     phase5 = _load_phase5_tables(data_dir, config)
-    codes = _historical_ts_codes(phase5["membership"])
-    if not codes:
-        raise ValueError("Phase 5 historical CSI 300 membership is empty")
+    sample_date, sample_security_id = _probe_observation(phase5["observations"])
+    sample_code = _security_id_to_ts_code(sample_security_id)
     definition = provider.query(
         config.exposure_source.endpoints.industry_classification,
         {"level": "L1", "src": config.exposure_source.classification_standard},
@@ -303,20 +367,26 @@ def probe_exposure_capabilities(config_dir: Path, data_dir: Path) -> dict[str, o
         set(normalized["source_index_code"].astype(str)),
         expected_l1_code=first_industry,
     )
-    first_date = config.warmup.start.strftime("%Y%m%d")
+    first_date = sample_date.strftime("%Y%m%d")
     market = provider.query(
         config.exposure_source.endpoints.market_cap,
-        {"ts_code": codes[0], "start_date": first_date, "end_date": first_date},
+        {"ts_code": sample_code, "start_date": first_date, "end_date": first_date},
         DAILY_BASIC_FIELDS,
     )
-    normalize_market_cap(market.frame, expected_ts_code=codes[0])
+    normalize_market_cap(
+        market.frame,
+        expected_ts_code=sample_code,
+        expected_start_date=sample_date,
+        expected_end_date=sample_date,
+    )
     return {
         "provider": "tushare",
         "classification_standard": "SW2021",
         "bounded_probe": True,
         "industry_count": len(normalized),
         "sample_industry": first_industry,
-        "sample_security": codes[0],
+        "sample_security": sample_code,
+        "sample_trade_date": sample_date.isoformat(),
         "capabilities": {
             "daily_basic": {"row_count": len(market.frame)},
             "index_classify": {"row_count": len(definition.frame)},
@@ -335,7 +405,9 @@ def acquire_exposure_tables(
     if not ts_codes:
         raise ValueError("Phase 5 historical CSI 300 membership is empty")
     start = config.warmup.start.strftime("%Y%m%d")
-    end = config.walk_forward_folds[-1].end.strftime("%Y%m%d")
+    end = config.test.end.strftime("%Y%m%d")
+    sample_date, sample_security_id = _probe_observation(phase5["observations"])
+    sample_code = _security_id_to_ts_code(sample_security_id)
 
     definition_result = provider.query(
         config.exposure_source.endpoints.industry_classification,
@@ -356,10 +428,19 @@ def acquire_exposure_tables(
     )
     probe_market = provider.query(
         config.exposure_source.endpoints.market_cap,
-        {"ts_code": ts_codes[0], "start_date": start, "end_date": start},
+        {
+            "ts_code": sample_code,
+            "start_date": sample_date.strftime("%Y%m%d"),
+            "end_date": sample_date.strftime("%Y%m%d"),
+        },
         DAILY_BASIC_FIELDS,
     )
-    normalize_market_cap(probe_market.frame, expected_ts_code=ts_codes[0])
+    normalize_market_cap(
+        probe_market.frame,
+        expected_ts_code=sample_code,
+        expected_start_date=sample_date,
+        expected_end_date=sample_date,
+    )
 
     worker_count = min(config.exposure_source.maximum_concurrency, len(ts_codes))
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -386,7 +467,12 @@ def acquire_exposure_tables(
     ]
     market = pd.concat(
         [
-            normalize_market_cap(item.frame, expected_ts_code=code)
+            normalize_market_cap(
+                item.frame,
+                expected_ts_code=code,
+                expected_start_date=config.warmup.start,
+                expected_end_date=config.test.end,
+            )
             for code, item in zip(ts_codes, market_results, strict=True)
         ],
         ignore_index=True,
@@ -405,6 +491,8 @@ def acquire_exposure_tables(
     expected_security_ids = {to_security_id(code) for code in ts_codes}
     expected_industry_ids = {f"CN:SW2021:{code}" for code in industry_codes}
     market.attrs["expected_security_ids"] = sorted(expected_security_ids)
+    market.attrs["expected_market_observations"] = phase5["observations"]
+    market.attrs["minimum_temporal_coverage"] = config.minimum_fold_coverage
     membership.attrs["expected_industry_ids"] = sorted(expected_industry_ids)
     if _interval_overlap_count(membership):
         raise ValueError("industry membership intervals overlap")
@@ -414,6 +502,8 @@ def acquire_exposure_tables(
         set(phase5["security"]["security_id"].astype(str)),
         expected_security_ids=expected_security_ids,
         expected_industry_ids=expected_industry_ids,
+        expected_market_observations=phase5["observations"],
+        minimum_temporal_coverage=config.minimum_fold_coverage,
     )
     if quality["status"] == "error":
         raise ValueError("exposure acquisition coverage gates failed")
@@ -460,17 +550,40 @@ def _load_phase5_tables(
     for key, name in (
         ("security", "security_master.parquet"),
         ("membership", "index_membership.parquet"),
+        ("universe", "universe_dates.parquet"),
     ):
         item = artifacts.get(name)
         if item is None:
-            if key == "membership":
-                result[key] = pd.DataFrame(columns=["security_id"])
-                continue
             raise ValueError(f"Phase 5 manifest missing {name}")
         path = data_dir / str(item["path"])
         if not path.is_file() or file_sha256(path) != str(item["sha256"]):
             raise ValueError(f"Phase 5 {name} checksum mismatch")
         result[key] = pd.read_parquet(path)
+    daily_parts: list[pd.DataFrame] = []
+    for name, item in sorted(artifacts.items()):
+        if not name.startswith("daily_bar/"):
+            continue
+        path = data_dir / str(item["path"])
+        if not path.is_file() or file_sha256(path) != str(item["sha256"]):
+            raise ValueError(f"Phase 5 {name} checksum mismatch")
+        daily_parts.append(pd.read_parquet(path, columns=["trade_date", "security_id"]))
+    if not daily_parts:
+        raise ValueError("Phase 5 manifest missing daily_bar observations")
+    daily = pd.concat(daily_parts, ignore_index=True).drop_duplicates()
+    universe = result["universe"].rename(columns={"as_of_date": "trade_date"})
+    observations = universe[["trade_date", "security_id"]].merge(
+        daily, on=["trade_date", "security_id"], how="inner"
+    )
+    observations["trade_date"] = pd.to_datetime(
+        observations["trade_date"], errors="raise"
+    ).dt.normalize()
+    observations = observations.loc[
+        (observations["trade_date"].dt.date >= config.warmup.start)
+        & (observations["trade_date"].dt.date <= config.test.end)
+    ]
+    result["observations"] = observations.sort_values(
+        ["trade_date", "security_id"], kind="stable"
+    ).reset_index(drop=True)
     return result
 
 
@@ -478,6 +591,15 @@ def _historical_ts_codes(membership: pd.DataFrame) -> list[str]:
     return sorted(
         _security_id_to_ts_code(value) for value in set(membership["security_id"])
     )
+
+
+def _probe_observation(observations: pd.DataFrame) -> tuple[date, str]:
+    if observations.empty:
+        raise ValueError("Phase 5 has no verified open active daily observations")
+    first = observations.sort_values(["trade_date", "security_id"], kind="stable").iloc[
+        0
+    ]
+    return pd.Timestamp(first["trade_date"]).date(), str(first["security_id"])
 
 
 def _security_id_to_ts_code(value: object) -> str:
@@ -549,3 +671,10 @@ def _quality_check(count: int) -> dict[str, object]:
         "status": "pass" if count == 0 else "fail",
         "count": count,
     }
+
+
+def _observation_keys(frame: pd.DataFrame) -> set[tuple[pd.Timestamp, str]]:
+    if frame.empty or not {"trade_date", "security_id"}.issubset(frame.columns):
+        return set()
+    dates = pd.to_datetime(frame["trade_date"], errors="raise").dt.normalize()
+    return set(zip(dates, frame["security_id"].astype(str), strict=True))

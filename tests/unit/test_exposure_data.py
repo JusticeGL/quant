@@ -27,6 +27,13 @@ from alpha_lab.robustness.exposure_data import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+_COVERAGE_DATES = (
+    "20200102",
+    "20210104",
+    "20220104",
+    "20250102",
+    "20260710",
+)
 
 
 def test_daily_basic_converts_ten_thousand_cny_to_cny() -> None:
@@ -209,6 +216,45 @@ def test_quality_rejects_missing_expected_security_and_industry_coverage() -> No
     assert report["checks"]["missing_industry_coverage"]["count"] == 1
 
 
+def test_quality_rejects_severe_temporal_gaps_despite_every_entity_present() -> None:
+    tables = ExposureTables(
+        market_cap=normalize_market_cap(
+            pd.DataFrame(
+                [
+                    ["600000.SH", "20200102", 1, 1],
+                    ["600001.SH", "20200102", 1, 1],
+                ],
+                columns=DAILY_BASIC_FIELDS,
+            )
+        ),
+        industry_definition=normalize_industry_definition(_definition_raw()),
+        industry_membership=normalize_industry_membership(
+            _membership_raw(), {"801010.SI"}
+        ),
+    )
+    expected = pd.DataFrame(
+        [
+            {"trade_date": date, "security_id": security_id}
+            for security_id in ("CN:SSE:600000", "CN:SSE:600001")
+            for date in pd.date_range("2020-01-02", periods=5, freq="B")
+        ]
+    )
+
+    report = validate_exposure_tables(
+        tables,
+        {"CN:SSE:600000", "CN:SSE:600001"},
+        expected_market_observations=expected,
+        minimum_temporal_coverage=0.70,
+    )
+
+    assert report["status"] == "error"
+    assert report["summary"]["expected_observation_count"] == 10
+    assert report["summary"]["observed_observation_count"] == 2
+    assert report["summary"]["temporal_coverage_ratio"] == 0.2
+    assert report["checks"]["insufficient_temporal_coverage"]["count"] == 8
+    assert report["checks"]["undercovered_security"]["count"] == 2
+
+
 def test_provider_row_limit_is_rejected() -> None:
     raw = pd.DataFrame(
         {
@@ -236,7 +282,7 @@ def test_phase5_membership_checksum_is_verified(tmp_path: Path) -> None:
         "snapshot_id": config.phase5_snapshot_id,
         "artifacts": [
             {
-                "name": path.name,
+                "name": path.relative_to(snapshot).as_posix(),
                 "path": path.relative_to(tmp_path).as_posix(),
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             }
@@ -266,6 +312,8 @@ def test_probe_uses_exact_bounded_queries_and_fields(
     report = probe_exposure_capabilities(ROOT / "config", tmp_path)
 
     assert report["bounded_probe"] is True
+    assert report["sample_trade_date"] == "2020-01-02"
+    assert report["sample_security"] == "600000.SH"
     assert provider.calls == [
         (
             "index_classify",
@@ -277,8 +325,8 @@ def test_probe_uses_exact_bounded_queries_and_fields(
             "daily_basic",
             {
                 "ts_code": "600000.SH",
-                "start_date": "20200101",
-                "end_date": "20200101",
+                "start_date": "20200102",
+                "end_date": "20200102",
             },
             DAILY_BASIC_FIELDS,
         ),
@@ -351,6 +399,12 @@ def test_acquisition_queries_each_security_and_l1_with_bounded_concurrency(
     assert provider.max_active_bulk == 2
     assert provider.max_active_bulk <= 4
     assert len(artifacts) == 6
+    assert [call[0] for call in provider.calls[:3]] == [
+        "index_classify",
+        "index_member_all",
+        "daily_basic",
+    ]
+    assert provider.calls[-1][0] == "index_member_all"
     assert [call[0] for call in provider.calls].count("index_classify") == 1
     member_calls = [call for call in provider.calls if call[0] == "index_member_all"]
     assert {call[1]["l1_code"] for call in member_calls} == {
@@ -361,6 +415,33 @@ def test_acquisition_queries_each_security_and_l1_with_bounded_concurrency(
     market_calls = [call for call in provider.calls if call[0] == "daily_basic"]
     assert len(market_calls) == 3
     assert all(call[2] == DAILY_BASIC_FIELDS for call in market_calls)
+    assert {
+        (call[1]["ts_code"], call[1]["start_date"], call[1]["end_date"])
+        for call in market_calls
+    } == {
+        ("600000.SH", "20200102", "20200102"),
+        ("600000.SH", "20200101", "20260711"),
+        ("600001.SH", "20200101", "20260711"),
+    }
+    quality = validate_exposure_tables(
+        tables,
+        {"CN:SSE:600000", "CN:SSE:600001"},
+    )
+    assert quality["status"] == "pass"
+    assert quality["summary"]["expected_observation_count"] == 10
+    assert quality["summary"]["observed_observation_count"] == 10
+    assert quality["summary"]["temporal_coverage_ratio"] == 1.0
+
+
+def test_acquisition_rejects_one_row_per_entity_over_long_horizon(
+    tmp_path: Path,
+) -> None:
+    _phase5_provider_fixture(tmp_path, security_ids=["CN:SSE:600000", "CN:SSE:600001"])
+    config, _ = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    provider = _AcquisitionFakeProvider(tmp_path, sparse_bulk=True)
+
+    with pytest.raises(ValueError, match="coverage"):
+        acquire_exposure_tables(tmp_path, config, provider)
 
 
 @pytest.mark.parametrize(
@@ -397,7 +478,7 @@ def _definition_raw() -> pd.DataFrame:
 
 def _market_raw() -> pd.DataFrame:
     return pd.DataFrame(
-        [["600000.SH", "20200101", 1, 1]],
+        [["600000.SH", "20200102", 1, 1]],
         columns=DAILY_BASIC_FIELDS,
     )
 
@@ -434,6 +515,39 @@ def _phase5_provider_fixture(
     frame = pd.DataFrame({"security_id": security_ids})
     frame.to_parquet(security)
     frame.to_parquet(membership)
+    universe = snapshot / "universe_dates.parquet"
+    daily = snapshot / "daily_bar" / "part.parquet"
+    daily.parent.mkdir(parents=True)
+    observations = pd.DataFrame(
+        [
+            {
+                "as_of_date": pd.Timestamp(value),
+                "trade_date": pd.Timestamp(value),
+                "security_id": security_id,
+            }
+            for value in _COVERAGE_DATES
+            for security_id in security_ids
+        ]
+    )
+    observations[["as_of_date", "security_id"]].to_parquet(universe)
+    pd.concat(
+        [
+            observations[["trade_date", "security_id"]],
+            pd.DataFrame(
+                [
+                    {
+                        "trade_date": pd.Timestamp("2020-01-01"),
+                        "security_id": security_ids[0],
+                    },
+                    {
+                        "trade_date": pd.Timestamp("2020-01-02"),
+                        "security_id": "CN:SSE:600999",
+                    },
+                ]
+            ),
+        ],
+        ignore_index=True,
+    ).to_parquet(daily)
     manifest_dir = tmp_path / "manifests" / config.phase5_snapshot_id
     manifest_dir.mkdir(parents=True)
     manifest = {
@@ -441,11 +555,11 @@ def _phase5_provider_fixture(
         "snapshot_type": "research_market",
         "artifacts": [
             {
-                "name": path.name,
+                "name": path.relative_to(snapshot).as_posix(),
                 "path": path.relative_to(tmp_path).as_posix(),
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             }
-            for path in (security, membership)
+            for path in (security, membership, universe, daily)
         ],
     }
     (manifest_dir / "manifest.json").write_text(json.dumps(manifest))
@@ -490,6 +604,7 @@ class _AcquisitionFakeProvider:
         *,
         empty_security: str | None = None,
         empty_industry: str | None = None,
+        sparse_bulk: bool = False,
     ) -> None:
         self.root = root
         self.calls: list[tuple[str, dict[str, object], tuple[str, ...]]] = []
@@ -499,6 +614,7 @@ class _AcquisitionFakeProvider:
         self.max_active_bulk = 0
         self.empty_security = empty_security
         self.empty_industry = empty_industry
+        self.sparse_bulk = sparse_bulk
 
     def query(
         self, api_name: str, params: dict[str, object], fields: tuple[str, ...]
@@ -506,7 +622,9 @@ class _AcquisitionFakeProvider:
         with self.lock:
             self.calls.append((api_name, dict(params), fields))
             request_number = len(self.calls)
-        is_bulk = api_name == "daily_basic" and params.get("end_date") == "20251231"
+        is_bulk = api_name == "daily_basic" and params.get("start_date") != params.get(
+            "end_date"
+        )
         if is_bulk:
             with self.lock:
                 self.active_bulk += 1
@@ -560,11 +678,17 @@ class _AcquisitionFakeProvider:
             )
         if api_name == "daily_basic":
             if (
-                params.get("end_date") == "20251231"
+                params.get("start_date") != params.get("end_date")
                 and params["ts_code"] == self.empty_security
             ):
                 return pd.DataFrame(columns=DAILY_BASIC_FIELDS)
-            return _market_raw().assign(
-                ts_code=str(params["ts_code"]), trade_date="20210104"
+            dates = (
+                (_COVERAGE_DATES[:1] if self.sparse_bulk else _COVERAGE_DATES)
+                if params.get("start_date") != params.get("end_date")
+                else (str(params["start_date"]),)
+            )
+            return pd.DataFrame(
+                [[str(params["ts_code"]), value, 1, 1] for value in dates],
+                columns=DAILY_BASIC_FIELDS,
             )
         raise AssertionError(f"unexpected endpoint: {api_name}")

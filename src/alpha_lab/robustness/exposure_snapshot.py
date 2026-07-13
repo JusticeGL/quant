@@ -312,11 +312,29 @@ def _phase5_dependency_failures(
         for item in phase5.get("artifacts", [])
         if isinstance(item, dict)
     }
-    for name in ("security_master.parquet", "index_membership.parquet"):
+    for name in (
+        "security_master.parquet",
+        "index_membership.parquet",
+        "universe_dates.parquet",
+    ):
         artifact = artifacts.get(name)
         if not isinstance(artifact, dict):
             failures.append(f"phase5:missing:{name}")
             continue
+        path = data_dir / str(artifact.get("path", ""))
+        if not path.is_file():
+            failures.append(f"phase5:missing:{name}")
+        elif file_sha256(path) != artifact.get("sha256"):
+            failures.append(f"phase5:sha256:{name}")
+    daily_names = sorted(
+        str(name)
+        for name in artifacts
+        if isinstance(name, str) and name.startswith("daily_bar/")
+    )
+    if not daily_names:
+        failures.append("phase5:missing:daily_bar")
+    for name in daily_names:
+        artifact = artifacts[name]
         path = data_dir / str(artifact.get("path", ""))
         if not path.is_file():
             failures.append(f"phase5:missing:{name}")
@@ -353,6 +371,8 @@ def _quality_report_failures(quality: object, manifest: dict[str, Any]) -> list[
         "invalid_market_cap",
         "missing_security_coverage",
         "missing_industry_coverage",
+        "insufficient_temporal_coverage",
+        "undercovered_security",
     }
     checks = quality["checks"]
     check_failure = set(checks) != expected_checks
@@ -406,20 +426,47 @@ def _quality_report_failures(quality: object, manifest: dict[str, Any]) -> list[
             artifacts, "industry_membership.parquet"
         ),
     }
+    expected_observations = summary.get("expected_observation_count", -1)
+    observed_observations = summary.get("observed_observation_count", -1)
+    reported_ratio = summary.get("temporal_coverage_ratio")
+    derived_ratio = (
+        observed_observations / expected_observations
+        if isinstance(expected_observations, int)
+        and expected_observations > 0
+        and isinstance(observed_observations, int)
+        else 1.0
+    )
     if (
         set(summary)
         != {
             *expected_summary_counts,
             "expected_security_count",
             "expected_industry_count",
+            "expected_observation_count",
+            "observed_observation_count",
+            "temporal_coverage_ratio",
+            "minimum_temporal_coverage",
         }
         or any(
             summary.get(key) != value for key, value in expected_summary_counts.items()
         )
         or any(
             not isinstance(summary.get(key), int) or summary[key] < 0
-            for key in ("expected_security_count", "expected_industry_count")
+            for key in (
+                "expected_security_count",
+                "expected_industry_count",
+                "expected_observation_count",
+                "observed_observation_count",
+            )
         )
+        or not isinstance(summary.get("temporal_coverage_ratio"), (int, float))
+        or not 0 <= summary["temporal_coverage_ratio"] <= 1
+        or not isinstance(summary.get("minimum_temporal_coverage"), (int, float))
+        or not 0 <= summary["minimum_temporal_coverage"] <= 1
+        or summary.get("observed_observation_count", 0)
+        > summary.get("expected_observation_count", 0)
+        or not isinstance(reported_ratio, (int, float))
+        or abs(float(reported_ratio) - derived_ratio) > 1e-12
     ):
         failures.append("quality_row_counts")
     return failures

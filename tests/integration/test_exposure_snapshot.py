@@ -61,6 +61,10 @@ def test_exposure_snapshot_is_deterministic_and_validated_before_pointer(
         == hashlib.sha256(phase5_manifest.read_bytes()).hexdigest()
     )
     assert manifest["policy_sha256"] == policy_sha256
+    assert any(
+        item["name"] == "market_cap/year=2026/part.parquet"
+        for item in manifest["artifacts"]
+    )
 
 
 def test_exposure_snapshot_refuses_quality_error_without_publishing_pointer(
@@ -114,6 +118,8 @@ def test_validation_requires_matching_quality_report(tmp_path: Path) -> None:
         ("manifest", "phase5_manifest_sha256"),
         ("security_master.parquet", "phase5:sha256:security_master.parquet"),
         ("index_membership.parquet", "phase5:sha256:index_membership.parquet"),
+        ("universe_dates.parquet", "phase5:sha256:universe_dates.parquet"),
+        ("daily_bar/part.parquet", "phase5:sha256:daily_bar/part.parquet"),
     ],
 )
 def test_validation_rejects_post_publication_phase5_tampering(
@@ -231,7 +237,10 @@ def _tables() -> ExposureTables:
         ],
     )
     market = pd.DataFrame(
-        [["600000.SH", "20210104", 123.4, 100.0]],
+        [
+            ["600000.SH", "20210104", 123.4, 100.0],
+            ["600000.SH", "20260710", 130.0, 110.0],
+        ],
         columns=["ts_code", "trade_date", "total_mv", "circ_mv"],
     )
     return ExposureTables(
@@ -248,8 +257,35 @@ def _phase5_fixture(tmp_path: Path) -> Path:
     research.mkdir(parents=True)
     security = research / "security_master.parquet"
     membership = research / "index_membership.parquet"
+    universe = research / "universe_dates.parquet"
+    daily = research / "daily_bar" / "part.parquet"
+    daily.parent.mkdir(parents=True)
     pd.DataFrame([{"security_id": "CN:SSE:600000"}]).to_parquet(security, index=False)
     pd.DataFrame([{"security_id": "CN:SSE:600000"}]).to_parquet(membership, index=False)
+    pd.DataFrame(
+        [
+            {
+                "as_of_date": pd.Timestamp("2021-01-04"),
+                "security_id": "CN:SSE:600000",
+            },
+            {
+                "as_of_date": pd.Timestamp("2026-07-10"),
+                "security_id": "CN:SSE:600000",
+            },
+        ]
+    ).to_parquet(universe, index=False)
+    pd.DataFrame(
+        [
+            {
+                "trade_date": pd.Timestamp("2021-01-04"),
+                "security_id": "CN:SSE:600000",
+            },
+            {
+                "trade_date": pd.Timestamp("2026-07-10"),
+                "security_id": "CN:SSE:600000",
+            },
+        ]
+    ).to_parquet(daily, index=False)
     manifest_dir = tmp_path / "manifests" / "p5-ecaa6e8aeae6b9f8fb25"
     manifest_dir.mkdir(parents=True)
     manifest = {
@@ -257,12 +293,12 @@ def _phase5_fixture(tmp_path: Path) -> Path:
         "snapshot_type": "research_market",
         "artifacts": [
             {
-                "name": artifact.name,
+                "name": artifact.relative_to(research).as_posix(),
                 "path": artifact.relative_to(tmp_path).as_posix(),
                 "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 "row_count": 1,
             }
-            for artifact in (security, membership)
+            for artifact in (security, membership, universe, daily)
         ],
     }
     path = manifest_dir / "manifest.json"
