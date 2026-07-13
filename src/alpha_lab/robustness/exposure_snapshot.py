@@ -86,6 +86,10 @@ def materialize_exposure_snapshot(
     temporary = Path(tempfile.mkdtemp(prefix=".p6x-build-", dir=exposure_root))
     try:
         artifacts = _write_tables(temporary, tables)
+        try:
+            _require_artifact_names(artifacts)
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("exposure artifact layout validation failed") from error
         quality_bytes = _canonical_bytes(quality)
         quality_sha256 = hashlib.sha256(quality_bytes).hexdigest()
         raw_identities = [
@@ -124,7 +128,7 @@ def materialize_exposure_snapshot(
         else:
             os.replace(temporary, snapshot_dir)
 
-        manifest_dir = data_dir / "manifests" / snapshot_id
+        manifest_dir = _manifest_dir(data_dir, snapshot_id)
         quality_path = manifest_dir / "quality_report.json"
         manifest_path = manifest_dir / "manifest.json"
         _write_immutable(quality_path, quality_bytes)
@@ -165,10 +169,11 @@ def materialize_exposure_snapshot(
             ],
             "artifacts": manifest_artifacts,
             "quality_report": {
-                "path": _portable_path(data_dir, quality_path),
+                "path": _expected_quality_reference_path(snapshot_id),
                 "sha256": quality_sha256,
             },
         }
+        _require_quality_reference(manifest["quality_report"], snapshot_id)
         _write_immutable(manifest_path, _canonical_bytes(manifest))
         validation = validate_exposure_snapshot(data_dir, snapshot_id)
         if not validation["healthy"]:
@@ -194,7 +199,7 @@ def materialize_exposure_snapshot(
 
 
 def validate_exposure_snapshot(data_dir: Path, snapshot_id: str) -> dict[str, object]:
-    manifest_path = data_dir / "manifests" / snapshot_id / "manifest.json"
+    manifest_path = _manifest_dir(data_dir, snapshot_id) / "manifest.json"
     if not manifest_path.is_file():
         raise ValueError(f"exposure snapshot manifest is missing: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -255,28 +260,37 @@ def validate_exposure_snapshot(data_dir: Path, snapshot_id: str) -> dict[str, ob
     if not isinstance(quality, dict):
         failures.append("missing:quality_report")
     else:
-        path = data_dir / str(quality["path"])
-        checked += 1
-        if not path.is_file():
-            failures.append(f"missing:{quality['path']}")
-        elif file_sha256(path) != str(quality["sha256"]):
-            failures.append(f"sha256:{quality['path']}")
+        try:
+            _require_quality_reference(quality, snapshot_id)
+        except (TypeError, ValueError):
+            failures.append("quality_reference")
         else:
-            try:
-                quality_document = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                failures.append("quality_schema")
+            path = data_dir / quality["path"]
+            checked += 1
+            if not path.is_file():
+                failures.append(f"missing:{quality['path']}")
+            elif file_sha256(path) != quality["sha256"]:
+                failures.append(f"sha256:{quality['path']}")
             else:
-                failures.extend(_quality_report_failures(quality_document, manifest))
                 try:
-                    recomputed_quality = _recompute_quality_report(data_dir, manifest)
-                except (KeyError, TypeError, ValueError, OSError):
-                    failures.append("quality_recomputed")
+                    quality_document = json.loads(path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    failures.append("quality_schema")
                 else:
-                    if _canonical_bytes(recomputed_quality) != _canonical_bytes(
-                        quality_document
-                    ):
+                    failures.extend(
+                        _quality_report_failures(quality_document, manifest)
+                    )
+                    try:
+                        recomputed_quality = _recompute_quality_report(
+                            data_dir, manifest
+                        )
+                    except (KeyError, TypeError, ValueError, OSError):
                         failures.append("quality_recomputed")
+                    else:
+                        if _canonical_bytes(recomputed_quality) != _canonical_bytes(
+                            quality_document
+                        ):
+                            failures.append("quality_recomputed")
     return {
         "snapshot_id": snapshot_id,
         "healthy": not failures and manifest.get("quality_status") != "error",
@@ -334,29 +348,15 @@ def _artifact_layout_failures(data_dir: Path, manifest: dict[str, Any]) -> list[
         snapshot_id = str(manifest["snapshot_id"])
         phase5_snapshot_id = str(manifest["phase5_snapshot_id"])
         artifacts = manifest["artifacts"]
-        if not isinstance(artifacts, list) or not all(
-            isinstance(item, dict) for item in artifacts
-        ):
-            raise ValueError("invalid artifacts")
-        names = [str(item["name"]) for item in artifacts]
-        if len(names) != len(set(names)):
-            raise ValueError("duplicate artifacts")
-        for fixed_name in (
-            "industry_definition.parquet",
-            "industry_membership.parquet",
-        ):
-            if names.count(fixed_name) != 1:
-                raise ValueError("missing fixed artifact")
+        names = _require_artifact_names(artifacts)
         market_pattern = re.compile(r"^market_cap/year=([0-9]{4})/part[.]parquet$")
         market_items: list[tuple[int, dict[str, Any]]] = []
         for item, name in zip(artifacts, names, strict=True):
             expected_path = (Path("exposures") / snapshot_id / name).as_posix()
             if item.get("path") != expected_path:
                 raise ValueError("artifact path mismatch")
-            if name.startswith("market_cap/"):
-                matched = market_pattern.fullmatch(name)
-                if matched is None:
-                    raise ValueError("invalid market partition grammar")
+            matched = market_pattern.fullmatch(name)
+            if matched is not None:
                 year = int(matched.group(1))
                 if year < start_date.year or year > end_date.year:
                     raise ValueError("market partition outside scope")
@@ -391,6 +391,47 @@ def _artifact_layout_failures(data_dir: Path, manifest: dict[str, Any]) -> list[
     except (KeyError, TypeError, ValueError, OSError):
         return ["artifact_layout"]
     return []
+
+
+def _require_artifact_names(artifacts: object) -> list[str]:
+    if not isinstance(artifacts, list) or not all(
+        isinstance(item, dict) for item in artifacts
+    ):
+        raise ValueError("invalid artifacts")
+    names = [str(item["name"]) for item in artifacts]
+    if len(names) != len(set(names)):
+        raise ValueError("duplicate artifacts")
+    fixed_names = {
+        "industry_definition.parquet",
+        "industry_membership.parquet",
+    }
+    market_pattern = re.compile(r"^market_cap/year=[0-9]{4}/part[.]parquet$")
+    if any(
+        name not in fixed_names and market_pattern.fullmatch(name) is None
+        for name in names
+    ):
+        raise ValueError("unexpected artifact name")
+    if any(names.count(name) != 1 for name in fixed_names):
+        raise ValueError("missing fixed artifact")
+    return names
+
+
+def _manifest_dir(data_dir: Path, snapshot_id: str) -> Path:
+    return data_dir / "manifests" / snapshot_id
+
+
+def _expected_quality_reference_path(snapshot_id: str) -> str:
+    return (Path("manifests") / snapshot_id / "quality_report.json").as_posix()
+
+
+def _require_quality_reference(quality: object, snapshot_id: str) -> None:
+    if not isinstance(quality, dict) or set(quality) != {"path", "sha256"}:
+        raise ValueError("invalid quality reference schema")
+    if quality["path"] != _expected_quality_reference_path(snapshot_id):
+        raise ValueError("quality report path mismatch")
+    sha256 = quality["sha256"]
+    if not isinstance(sha256, str) or re.fullmatch(r"[0-9a-f]{64}", sha256) is None:
+        raise ValueError("invalid quality report checksum")
 
 
 def _recompute_quality_report(

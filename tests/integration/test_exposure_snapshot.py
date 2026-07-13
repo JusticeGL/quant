@@ -59,6 +59,12 @@ def test_exposure_snapshot_is_deterministic_and_validated_before_pointer(
     validation = validate_exposure_snapshot(tmp_path, first.snapshot_id)
     assert validation["healthy"] is True
     manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
+    assert first.manifest_path == (
+        tmp_path / "manifests" / first.snapshot_id / "manifest.json"
+    )
+    assert manifest["quality_report"]["path"] == (
+        f"manifests/{first.snapshot_id}/quality_report.json"
+    )
     assert (
         manifest["phase5_manifest_sha256"]
         == hashlib.sha256(phase5_manifest.read_bytes()).hexdigest()
@@ -278,6 +284,42 @@ def test_validation_rejects_undeclared_extra_market_partition(
     assert "artifact_layout" in validation["failures"]
 
 
+def test_materialization_rejects_declared_present_unexpected_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    original_write_tables = exposure_snapshot._write_tables
+
+    def write_tables_with_unexpected(root: Path, tables: ExposureTables):
+        artifacts = original_write_tables(root, tables)
+        source = root / "industry_definition.parquet"
+        unexpected = root / "unexpected.parquet"
+        shutil.copyfile(source, unexpected)
+        artifacts.append(
+            {
+                "name": "unexpected.parquet",
+                "sha256": hashlib.sha256(unexpected.read_bytes()).hexdigest(),
+                "row_count": len(tables.industry_definition),
+            }
+        )
+        return sorted(artifacts, key=lambda item: str(item["name"]))
+
+    monkeypatch.setattr(exposure_snapshot, "_write_tables", write_tables_with_unexpected)
+
+    with pytest.raises(ValueError, match="validation"):
+        materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            _tables(),
+            [_raw_input(tmp_path)],
+        )
+
+    assert not (tmp_path / "state" / "latest_exposure_snapshot.txt").exists()
+
+
 def test_validation_rejects_manifest_identity_tampering(tmp_path: Path) -> None:
     result = _materialize_fixture(tmp_path)
     manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
@@ -300,6 +342,33 @@ def test_validation_requires_matching_quality_report(tmp_path: Path) -> None:
 
     assert validation["healthy"] is False
     assert "missing:quality_report" in validation["failures"]
+
+
+def test_validation_rejects_detached_quality_report_path(tmp_path: Path) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    source = tmp_path / manifest["quality_report"]["path"]
+    detached = tmp_path / "manifests" / "detached-quality.json"
+    shutil.copyfile(source, detached)
+    manifest["quality_report"]["path"] = "manifests/detached-quality.json"
+    result.manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_reference" in validation["failures"]
+
+
+def test_validation_rejects_quality_reference_with_extra_fields(tmp_path: Path) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    manifest["quality_report"]["detached"] = False
+    result.manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_reference" in validation["failures"]
 
 
 @pytest.mark.parametrize(
