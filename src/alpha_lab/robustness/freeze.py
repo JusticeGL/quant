@@ -13,6 +13,10 @@ import yaml
 
 from alpha_lab.baseline.config import CostConfig
 from alpha_lab.factors.contract import FactorMetadata
+from alpha_lab.quality_contracts import (
+    exposure_quality_failures,
+    phase5_quality_failures,
+)
 from alpha_lab.research_data.config import load_research_data_config
 from alpha_lab.robustness.config import load_robustness_config
 from alpha_lab.robustness.contracts import FrozenCandidate
@@ -284,6 +288,8 @@ def _validate_phase5_manifest_structure(
         data_dir,
         snapshot_id,
         manifest["quality_report"],
+        manifest=manifest,
+        snapshot_kind="phase5",
         expected_status=str(manifest["quality_status"]),
         expected_policy="phase5_point_in_time_quality_v1",
         label=label,
@@ -361,6 +367,8 @@ def _validate_exposure_manifest_structure(
         data_dir,
         snapshot_id,
         manifest["quality_report"],
+        manifest=manifest,
+        snapshot_kind="exposure",
         expected_status="pass",
         expected_policy="phase6_exposure_quality_v1",
         label=label,
@@ -659,6 +667,8 @@ def _validate_quality_reference(
     snapshot_id: str,
     value: object,
     *,
+    manifest: dict[str, Any],
+    snapshot_kind: str,
     expected_status: str,
     expected_policy: str,
     label: str,
@@ -680,6 +690,13 @@ def _validate_quality_reference(
         or not isinstance(quality.get("checks"), dict)
     ):
         raise ValueError(f"{label} quality report schema is invalid")
+    failures = (
+        phase5_quality_failures(quality, manifest)
+        if snapshot_kind == "phase5"
+        else exposure_quality_failures(quality, manifest)
+    )
+    if failures:
+        raise ValueError(f"{label} quality contract is invalid: {', '.join(failures)}")
     return quality
 
 

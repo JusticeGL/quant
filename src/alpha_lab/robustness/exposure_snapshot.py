@@ -18,6 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from alpha_lab.data.providers.base import file_sha256
+from alpha_lab.quality_contracts import exposure_quality_failures
 from alpha_lab.research_data.provider import TushareArtifact
 from alpha_lab.robustness.config import RobustnessConfig, load_robustness_config
 from alpha_lab.robustness.contracts import ExposureSnapshotResult, ExposureTables
@@ -556,141 +557,7 @@ def _phase5_dependency_failures(
 
 
 def _quality_report_failures(quality: object, manifest: dict[str, Any]) -> list[str]:
-    if not isinstance(quality, dict):
-        return ["quality_schema"]
-    required_top_level = {
-        "schema_version",
-        "policy",
-        "status",
-        "summary",
-        "checks",
-    }
-    if set(quality) != required_top_level:
-        return ["quality_schema"]
-    if (
-        quality.get("schema_version") != 1
-        or quality.get("policy") != "phase6_exposure_quality_v1"
-        or not isinstance(quality.get("summary"), dict)
-        or not isinstance(quality.get("checks"), dict)
-    ):
-        return ["quality_schema"]
-    expected_checks = {
-        "empty_required_table",
-        "duplicate_keys",
-        "industry_interval_overlap",
-        "unknown_security_reference",
-        "unknown_industry_reference",
-        "invalid_market_cap",
-        "missing_security_coverage",
-        "missing_industry_coverage",
-        "insufficient_temporal_coverage",
-        "undercovered_security",
-        "market_cap_out_of_scope",
-    }
-    checks = quality["checks"]
-    check_failure = set(checks) != expected_checks
-    counts: list[int] = []
-    if not check_failure:
-        for item in checks.values():
-            if not isinstance(item, dict) or set(item) != {
-                "severity",
-                "status",
-                "count",
-            }:
-                check_failure = True
-                break
-            count = item.get("count")
-            if (
-                item.get("severity") != "error"
-                or not isinstance(count, int)
-                or isinstance(count, bool)
-                or count < 0
-                or item.get("status") != ("pass" if count == 0 else "fail")
-            ):
-                check_failure = True
-                break
-            counts.append(count)
-    failures = ["quality_checks"] if check_failure else []
-    derived_status = "error" if any(counts) or check_failure else "pass"
-    if (
-        quality.get("status") != derived_status
-        or quality.get("status") != manifest.get("quality_status")
-        or quality.get("status") == "error"
-    ):
-        failures.append("quality_status")
-
-    summary = quality["summary"]
-    artifacts = {
-        item.get("name"): item
-        for item in manifest.get("artifacts", [])
-        if isinstance(item, dict)
-    }
-    market_count = sum(
-        int(item.get("row_count", -1))
-        for name, item in artifacts.items()
-        if isinstance(name, str) and name.startswith("market_cap/")
-    )
-    expected_summary_counts = {
-        "market_cap_count": market_count,
-        "industry_definition_count": _artifact_row_count(
-            artifacts, "industry_definition.parquet"
-        ),
-        "industry_membership_count": _artifact_row_count(
-            artifacts, "industry_membership.parquet"
-        ),
-    }
-    expected_observations = summary.get("expected_observation_count", -1)
-    observed_observations = summary.get("observed_observation_count", -1)
-    reported_ratio = summary.get("temporal_coverage_ratio")
-    derived_ratio = (
-        observed_observations / expected_observations
-        if isinstance(expected_observations, int)
-        and expected_observations > 0
-        and isinstance(observed_observations, int)
-        else 1.0
-    )
-    if (
-        set(summary)
-        != {
-            *expected_summary_counts,
-            "expected_security_count",
-            "expected_industry_count",
-            "expected_observation_count",
-            "observed_observation_count",
-            "temporal_coverage_ratio",
-            "minimum_temporal_coverage",
-        }
-        or any(
-            summary.get(key) != value for key, value in expected_summary_counts.items()
-        )
-        or any(
-            not isinstance(summary.get(key), int) or summary[key] < 0
-            for key in (
-                "expected_security_count",
-                "expected_industry_count",
-                "expected_observation_count",
-                "observed_observation_count",
-            )
-        )
-        or not isinstance(summary.get("temporal_coverage_ratio"), (int, float))
-        or not 0 <= summary["temporal_coverage_ratio"] <= 1
-        or not isinstance(summary.get("minimum_temporal_coverage"), (int, float))
-        or not 0 <= summary["minimum_temporal_coverage"] <= 1
-        or summary.get("observed_observation_count", 0)
-        > summary.get("expected_observation_count", 0)
-        or not isinstance(reported_ratio, (int, float))
-        or abs(float(reported_ratio) - derived_ratio) > 1e-12
-    ):
-        failures.append("quality_row_counts")
-    return failures
-
-
-def _artifact_row_count(artifacts: dict[object, dict[str, Any]], name: str) -> int:
-    artifact = artifacts.get(name)
-    if not isinstance(artifact, dict):
-        return -1
-    value = artifact.get("row_count")
-    return value if isinstance(value, int) and not isinstance(value, bool) else -1
+    return exposure_quality_failures(quality, manifest)
 
 
 def _write_frame(

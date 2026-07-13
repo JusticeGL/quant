@@ -307,6 +307,52 @@ def test_freeze_rejects_noncanonical_published_snapshot_manifests(
         )
 
 
+@pytest.mark.parametrize("snapshot_kind", ["phase5", "exposure"])
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "empty_checks",
+        "missing_check",
+        "extra_check",
+        "malformed_check",
+        "false_pass",
+        "summary_row_count_drift",
+    ],
+)
+@pytest.mark.parametrize("operation", ["create", "validate"])
+def test_freeze_creation_and_validation_reject_invalid_quality_contracts(
+    freeze_fixture: dict[str, Path],
+    snapshot_kind: str,
+    corruption: str,
+    operation: str,
+) -> None:
+    frozen = None
+    if operation == "validate":
+        frozen = freeze_candidate(
+            "F1002",
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+            freeze_fixture["experiments"],
+        )
+
+    _corrupt_and_republish_quality(freeze_fixture, snapshot_kind, corruption)
+
+    with pytest.raises(ValueError, match="quality"):
+        if frozen is None:
+            freeze_candidate(
+                "F1002",
+                freeze_fixture["config"],
+                freeze_fixture["data"],
+                freeze_fixture["experiments"],
+            )
+        else:
+            validate_freeze(
+                frozen.freeze_path,
+                freeze_fixture["config"],
+                freeze_fixture["data"],
+            )
+
+
 @pytest.mark.parametrize(
     "target",
     [
@@ -789,6 +835,119 @@ def _write_fixture_artifacts(
             }
         )
     return artifacts
+
+
+def _corrupt_and_republish_quality(
+    fixture: dict[str, Path], snapshot_kind: str, corruption: str
+) -> None:
+    data_dir = fixture["data"]
+    manifest_path = fixture[f"{snapshot_kind}_manifest"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    quality_path = data_dir / manifest["quality_report"]["path"]
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    checks = quality["checks"]
+    first_check = next(iter(checks))
+    if corruption == "empty_checks":
+        quality["checks"] = {}
+    elif corruption == "missing_check":
+        del checks[first_check]
+    elif corruption == "extra_check":
+        checks["unexpected_check"] = {
+            "severity": "error",
+            "status": "pass",
+            "count": 0,
+        }
+    elif corruption == "malformed_check":
+        checks[first_check] = {"severity": "error", "status": "pass"}
+    elif corruption == "false_pass":
+        checks[first_check] = {
+            "severity": "error",
+            "status": "fail",
+            "count": 1,
+        }
+    else:
+        count_name = (
+            "daily_bar_count" if snapshot_kind == "phase5" else "market_cap_count"
+        )
+        quality["summary"][count_name] += 1
+
+    if snapshot_kind == "phase5":
+        quality_bytes = _canonical_json_bytes(quality)
+        quality_path.write_bytes(quality_bytes)
+        manifest["quality_report"]["sha256"] = hashlib.sha256(quality_bytes).hexdigest()
+        manifest["scope"] = quality["scope"]
+        manifest["summary"] = quality["summary"]
+        manifest_path.write_bytes(_canonical_json_bytes(manifest))
+        _republish_exposure_snapshot(
+            fixture,
+            phase5_manifest_sha256=_sha256(manifest_path),
+        )
+    else:
+        _republish_exposure_snapshot(fixture, quality=quality)
+
+
+def _republish_exposure_snapshot(
+    fixture: dict[str, Path],
+    *,
+    quality: dict[str, object] | None = None,
+    phase5_manifest_sha256: str | None = None,
+) -> Path:
+    data_dir = fixture["data"]
+    old_manifest_path = fixture["exposure_manifest"]
+    manifest = json.loads(old_manifest_path.read_text(encoding="utf-8"))
+    old_snapshot_id = manifest["snapshot_id"]
+    if quality is None:
+        old_quality_path = data_dir / manifest["quality_report"]["path"]
+        quality = json.loads(old_quality_path.read_text(encoding="utf-8"))
+    quality_bytes = _canonical_json_bytes(quality)
+    if phase5_manifest_sha256 is not None:
+        manifest["phase5_manifest_sha256"] = phase5_manifest_sha256
+    manifest["quality_report"]["sha256"] = hashlib.sha256(quality_bytes).hexdigest()
+    identity = {
+        "exposure_schema_version": manifest["schema_version"],
+        "phase5_manifest_sha256": manifest["phase5_manifest_sha256"],
+        "policy_sha256": manifest["policy_sha256"],
+        "quality_report_sha256": manifest["quality_report"]["sha256"],
+        "coverage_scope": manifest["coverage_scope"],
+        "raw_request_identities": [
+            {
+                key: item[key]
+                for key in (
+                    "api_name",
+                    "request_sha256",
+                    "sha256",
+                    "row_count",
+                    "params",
+                    "fields",
+                )
+            }
+            for item in manifest["raw_inputs"]
+        ],
+        "artifacts": [
+            {key: item[key] for key in ("name", "sha256", "row_count")}
+            for item in manifest["artifacts"]
+        ],
+    }
+    identity_sha256 = hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
+    new_snapshot_id = f"p6x-{identity_sha256[:20]}"
+    old_root = data_dir / "exposures" / old_snapshot_id
+    new_root = data_dir / "exposures" / new_snapshot_id
+    shutil.copytree(old_root, new_root)
+    manifest["snapshot_id"] = new_snapshot_id
+    manifest["identity_sha256"] = identity_sha256
+    for item in manifest["artifacts"]:
+        item["path"] = f"exposures/{new_snapshot_id}/{item['name']}"
+    manifest["quality_report"]["path"] = (
+        f"manifests/{new_snapshot_id}/quality_report.json"
+    )
+    new_manifest_dir = data_dir / "manifests" / new_snapshot_id
+    new_manifest_dir.mkdir(parents=True)
+    (new_manifest_dir / "quality_report.json").write_bytes(quality_bytes)
+    new_manifest_path = new_manifest_dir / "manifest.json"
+    new_manifest_path.write_bytes(_canonical_json_bytes(manifest))
+    pointer = data_dir / "state" / "latest_exposure_snapshot.txt"
+    pointer.write_text(f"{new_snapshot_id}\n", encoding="utf-8")
+    return new_manifest_path
 
 
 def _raw_identity(prefix: str, content: bytes) -> dict[str, object]:
