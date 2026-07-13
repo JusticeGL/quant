@@ -305,7 +305,9 @@ def test_materialization_rejects_declared_present_unexpected_artifact(
         )
         return sorted(artifacts, key=lambda item: str(item["name"]))
 
-    monkeypatch.setattr(exposure_snapshot, "_write_tables", write_tables_with_unexpected)
+    monkeypatch.setattr(
+        exposure_snapshot, "_write_tables", write_tables_with_unexpected
+    )
 
     with pytest.raises(ValueError, match="validation"):
         materialize_exposure_snapshot(
