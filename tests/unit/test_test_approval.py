@@ -13,6 +13,7 @@ import pytest
 
 from alpha_lab.evaluation.config import load_evaluation_config
 from alpha_lab.robustness import final_test
+from alpha_lab.robustness import report as robustness_report
 from alpha_lab.robustness.approval import (
     approve_test_request,
     create_test_request,
@@ -49,6 +50,24 @@ def _isolate_full_freeze_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
         return {**document, "healthy": True, "freeze_sha256": _sha256(path)}
 
     monkeypatch.setattr("alpha_lab.robustness.approval.validate_freeze", validate)
+
+    def replay(
+        path: Path,
+        config_dir: Path,
+        _data_dir: Path,
+        experiments_dir: Path,
+    ) -> object:
+        source = config_dir.parent / "experiments" / "phase6" / path.parent.name
+        for name in (
+            "walk_forward.json",
+            "cost_sensitivity.json",
+            "exposure_report.json",
+            "robustness_report.md",
+        ):
+            shutil.copyfile(source / name, path.parent / name)
+        return object()
+
+    monkeypatch.setattr(robustness_report, "evaluate_frozen_candidate", replay)
 
 
 def test_request_rejects_invalid_freeze_identity(tmp_path: Path) -> None:
@@ -176,6 +195,81 @@ def test_request_is_hash_linked_canonical_and_idempotent(tmp_path: Path) -> None
     assert all(document["gates"].values())
 
 
+def test_request_rejects_wholly_replaced_self_consistent_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    freeze = _freeze_fixture(tmp_path)
+    genuine = {
+        name: (freeze.parent / name).read_bytes()
+        for name in (
+            "walk_forward.json",
+            "cost_sensitivity.json",
+            "exposure_report.json",
+            "robustness_report.md",
+        )
+    }
+    walk_path = freeze.parent / "walk_forward.json"
+    walk = json.loads(walk_path.read_text(encoding="utf-8"))
+    for fold in walk["folds"]:
+        fold["input_row_count"] = 20
+        fold["valid_row_count"] = 16
+        fold["mean_ic"] = 0.02
+        fold["mean_rank_ic"] = 0.02
+    _write_json(walk_path, walk)
+    costs_path = freeze.parent / "cost_sensitivity.json"
+    costs = json.loads(costs_path.read_text(encoding="utf-8"))
+    for scenario in costs["scenarios"].values():
+        for fold in scenario["folds"]:
+            fold["metrics"]["final_nav"] = 1020000.0
+            fold["metrics"]["total_return"] = 0.02
+        scenario["metrics"]["total_return"] = (1.02**5) - 1.0
+    _write_json(costs_path, costs)
+    exposure_path = freeze.parent / "exposure_report.json"
+    exposure = json.loads(exposure_path.read_text(encoding="utf-8"))
+    exposure["industry"]["original_rank_ic"] = 0.2
+    exposure["industry"]["neutral_rank_ic"] = 0.12
+    _write_json(exposure_path, exposure)
+    (freeze.parent / "robustness_report.md").write_bytes(_markdown(walk, exposure))
+
+    def replay_genuine(
+        path: Path, _config: Path, _data: Path, _experiments: Path
+    ) -> object:
+        for name, content in genuine.items():
+            (path.parent / name).write_bytes(content)
+        return object()
+
+    monkeypatch.setattr(robustness_report, "evaluate_frozen_candidate", replay_genuine)
+    with pytest.raises(ValueError, match="evidence replay mismatch"):
+        create_test_request(freeze)
+
+
+def test_request_replay_is_temporary_and_copies_only_freeze(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    freeze = _freeze_fixture(tmp_path)
+    replay_roots: list[Path] = []
+
+    def guarded_replay(
+        path: Path, _config: Path, _data: Path, experiments: Path
+    ) -> object:
+        replay_roots.append(experiments)
+        assert sorted(item.name for item in path.parent.iterdir()) == ["freeze.json"]
+        for name in (
+            "walk_forward.json",
+            "cost_sensitivity.json",
+            "exposure_report.json",
+            "robustness_report.md",
+        ):
+            shutil.copyfile(freeze.parent / name, path.parent / name)
+        (path.parent / "large").mkdir()
+        (path.parent / "large" / "scratch.bin").write_bytes(b"temporary")
+        return object()
+
+    monkeypatch.setattr(robustness_report, "evaluate_frozen_candidate", guarded_replay)
+    create_test_request(freeze)
+    assert replay_roots and all(not root.exists() for root in replay_roots)
+
+
 def test_request_refuses_existing_conflicting_bytes(tmp_path: Path) -> None:
     freeze = _freeze_fixture(tmp_path)
     path = create_test_request(freeze)
@@ -213,9 +307,12 @@ def test_approval_rejects_request_input_hash_drift(tmp_path: Path, name: str) ->
         "src/alpha_lab/evaluation/metrics.py",
         "src/alpha_lab/data/normalize.py",
         "src/alpha_lab/database/catalog.py",
+        "src/alpha_lab/quality_contracts.py",
         "src/alpha_lab/database/sql/003_robustness.sql",
         "src/alpha_lab/robustness/approval.py",
         "src/alpha_lab/robustness/final_test.py",
+        "pyproject.toml",
+        "uv.lock",
     ],
 )
 def test_approval_rejects_execution_config_or_code_drift(
@@ -386,6 +483,7 @@ def _freeze_fixture(tmp_path: Path, *, passed: bool = True) -> Path:
         "src/alpha_lab/baseline/config.py",
         "src/alpha_lab/data/normalize.py",
         "src/alpha_lab/database/catalog.py",
+        "src/alpha_lab/quality_contracts.py",
         "src/alpha_lab/evaluation/config.py",
         "src/alpha_lab/evaluation/metrics.py",
         "src/alpha_lab/factors/contract.py",
@@ -408,6 +506,8 @@ def _freeze_fixture(tmp_path: Path, *, passed: bool = True) -> Path:
     shutil.copytree(
         ROOT / "src/alpha_lab/database/sql", tmp_path / "src/alpha_lab/database/sql"
     )
+    for name in ("Dockerfile", "compose.yaml", "pyproject.toml", "uv.lock"):
+        shutil.copyfile(ROOT / name, tmp_path / name)
     payload = {
         "schema_version": 1,
         "factor": {

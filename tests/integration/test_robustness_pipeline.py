@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ import pytest
 
 from alpha_lab.baseline.backtest import BacktestResult
 from alpha_lab.robustness import report
+from alpha_lab.robustness.approval import _replay_pretest_evidence
 from alpha_lab.robustness.report import evaluate_frozen_candidate
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -159,13 +161,20 @@ def test_pipeline_computes_once_uses_fold_bounds_and_is_repeatable(
     second = evaluate_frozen_candidate(
         freeze_path, ROOT / "config", tmp_path / "data", experiments
     )
+    shutil.copytree(ROOT / "config", tmp_path / "config")
+    shutil.copytree(
+        ROOT / "src/alpha_lab/factors/candidates",
+        tmp_path / "src/alpha_lab/factors/candidates",
+    )
+    _replay_pretest_evidence(freeze_path, tmp_path)
 
-    assert computes == 2  # exactly once per complete evaluation invocation
-    assert len(allowed_ends) == 40  # five folds x four costs x two invocations
+    assert computes == 3  # exactly once per complete evaluation invocation/replay
+    assert len(allowed_ends) == 60  # five folds x four costs x three invocations
     assert sorted(set(allowed_ends)) == [
         date(year, 12, 31) for year in range(2021, 2026)
     ]
-    assert reads == [date(2026, 1, 1)] * 4
+    assert reads == [date(2026, 1, 1)] * 6
+    assert not list(experiments.glob(".pretest-replay-*"))
     assert first.report_sha256 == second.report_sha256
     assert all(
         (freeze_dir / name).read_bytes() == content

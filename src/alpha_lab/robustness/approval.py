@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import shutil
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,7 @@ import yaml
 from alpha_lab.database import catalog
 from alpha_lab.evaluation.config import load_evaluation_config
 from alpha_lab.factors.contract import FactorMetadata
+from alpha_lab.robustness import report as robustness_report
 from alpha_lab.robustness.config import load_robustness_config
 from alpha_lab.robustness.freeze import validate_freeze
 from alpha_lab.robustness.report import _markdown
@@ -43,28 +45,11 @@ _EXECUTION_CONFIGS = (
     "robustness.yaml",
     "splits.yaml",
 )
-_EXECUTION_MODULES = (
-    "src/alpha_lab/baseline/backtest.py",
-    "src/alpha_lab/baseline/config.py",
-    "src/alpha_lab/data/normalize.py",
-    "src/alpha_lab/database/catalog.py",
-    "src/alpha_lab/evaluation/config.py",
-    "src/alpha_lab/evaluation/metrics.py",
-    "src/alpha_lab/factors/contract.py",
-    "src/alpha_lab/factors/registry.py",
-    "src/alpha_lab/robustness/approval.py",
-    "src/alpha_lab/robustness/config.py",
-    "src/alpha_lab/robustness/exposures.py",
-    "src/alpha_lab/robustness/final_test.py",
-    "src/alpha_lab/robustness/freeze.py",
-    "src/alpha_lab/robustness/io.py",
-    "src/alpha_lab/robustness/report.py",
-    "src/alpha_lab/robustness/walk_forward.py",
-)
-_EXECUTION_RESOURCES = (
-    "src/alpha_lab/database/sql/001_initial.sql",
-    "src/alpha_lab/database/sql/002_research_data.sql",
-    "src/alpha_lab/database/sql/003_robustness.sql",
+_EXECUTION_ROOT_RESOURCES = (
+    "Dockerfile",
+    "compose.yaml",
+    "pyproject.toml",
+    "uv.lock",
 )
 
 
@@ -92,6 +77,7 @@ def create_test_request(freeze_path: Path) -> Path:
     gates = _validate_robustness_artifacts(
         freeze_dir, freeze, freeze_sha256, repo_root / "config"
     )
+    _replay_pretest_evidence(freeze_path, repo_root)
     test = freeze.get("test")
     if test != {
         "access": "human_approval_only",
@@ -709,34 +695,42 @@ def _nonnegative_int(value: object) -> bool:
 
 
 def _execution_bundle(repo_root: Path, freeze: dict[str, Any]) -> dict[str, Any]:
+    del freeze
     config_root = repo_root / "config"
     config = {
         f"config/{name}": _sha256(
             _required_regular_file(config_root / name, config_root)
         )
-        for name in _EXECUTION_CONFIGS
+        for name in sorted(_EXECUTION_CONFIGS)
     }
-    factor = freeze["factor"]
-    paths = [
-        *_EXECUTION_MODULES,
-        str(factor["source_path"]),
-        str(factor["metadata_path"]),
-    ]
-    candidate_dir = repo_root / "src/alpha_lab/factors/candidates"
-    paths.extend(
-        path.relative_to(repo_root).as_posix()
-        for path in candidate_dir.glob("F[0-9][0-9][0-9][0-9].*")
-        if path.suffix in {".py", ".yaml"}
-    )
+    paths = _execution_code_paths(repo_root)
     code = {
         name: _sha256(_required_regular_file(repo_root / name, repo_root))
-        for name in sorted(set(paths))
+        for name in paths
     }
+    resource_paths = _execution_resource_paths(repo_root)
     resources = {
         name: _sha256(_required_regular_file(repo_root / name, repo_root))
-        for name in _EXECUTION_RESOURCES
+        for name in resource_paths
     }
     return {"configs": config, "code": code, "resources": resources}
+
+
+def _execution_code_paths(repo_root: Path) -> list[str]:
+    source_root = repo_root / "src" / "alpha_lab"
+    return sorted(
+        path.relative_to(repo_root).as_posix() for path in source_root.rglob("*.py")
+    )
+
+
+def _execution_resource_paths(repo_root: Path) -> list[str]:
+    sql_root = repo_root / "src" / "alpha_lab" / "database" / "sql"
+    package_resources = [
+        path.relative_to(repo_root).as_posix()
+        for pattern_root, suffix in ((sql_root, "*.sql"), (repo_root / "src", "*.yaml"))
+        for path in pattern_root.rglob(suffix)
+    ]
+    return sorted([*package_resources, *_EXECUTION_ROOT_RESOURCES])
 
 
 def _validate_execution_bundle_schema(value: object) -> None:
@@ -751,6 +745,7 @@ def _validate_execution_bundle_schema(value: object) -> None:
         if (
             not isinstance(items, dict)
             or not items
+            or list(items) != sorted(items)
             or any(
                 not isinstance(path, str) or not _sha(sha)
                 for path, sha in items.items()
@@ -765,15 +760,49 @@ def validate_execution_bundle_files(request: dict[str, Any], repo_root: Path) ->
     expected_configs = {f"config/{name}" for name in _EXECUTION_CONFIGS}
     if set(bundle["configs"]) != expected_configs:
         raise ValueError("test request execution config bundle is incomplete")
-    if not set(_EXECUTION_MODULES).issubset(bundle["code"]):
+    expected_code = set(_execution_code_paths(repo_root))
+    if set(bundle["code"]) != expected_code:
         raise ValueError("test request execution code bundle is incomplete")
-    if set(bundle["resources"]) != set(_EXECUTION_RESOURCES):
+    expected_resources = set(_execution_resource_paths(repo_root))
+    if set(bundle["resources"]) != expected_resources:
         raise ValueError("test request execution resource bundle is incomplete")
     for section in ("configs", "code", "resources"):
         for relative, expected_sha256 in bundle[section].items():
             path = _required_regular_file(repo_root / relative, repo_root)
             if _sha256(path) != expected_sha256:
                 raise ValueError(f"test request execution bundle drift: {relative}")
+
+
+def _replay_pretest_evidence(freeze_path: Path, repo_root: Path) -> None:
+    experiments_root = repo_root / "experiments"
+    experiments_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".pretest-replay-", dir=experiments_root
+    ) as temporary_name:
+        replay_experiments = Path(temporary_name)
+        replay_dir = replay_experiments / "phase6" / freeze_path.parent.name
+        replay_dir.mkdir(parents=True)
+        replay_freeze = replay_dir / "freeze.json"
+        shutil.copyfile(freeze_path, replay_freeze)
+        robustness_report.evaluate_frozen_candidate(
+            replay_freeze,
+            repo_root / "config",
+            repo_root / "data",
+            replay_experiments,
+        )
+        for name in _ROBUSTNESS_ARTIFACTS:
+            original = _required_regular_file(
+                freeze_path.parent / name, freeze_path.parent
+            )
+            replayed = _required_regular_file(replay_dir / name, replay_dir)
+            original_bytes = original.read_bytes()
+            replayed_bytes = replayed.read_bytes()
+            if (
+                original_bytes != replayed_bytes
+                or hashlib.sha256(original_bytes).hexdigest()
+                != hashlib.sha256(replayed_bytes).hexdigest()
+            ):
+                raise ValueError(f"robustness evidence replay mismatch: {name}")
 
 
 def _register_test_request(

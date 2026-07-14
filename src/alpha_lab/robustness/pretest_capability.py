@@ -235,9 +235,7 @@ def _validate_catalog_anchor(
     if len(quality_rows) != 1:
         raise ValueError("pre-test capability catalog quality anchor is missing")
     checked_artifacts = (
-        len(manifest.get("raw_inputs", []))
-        + len(manifest.get("artifacts", []))
-        + 1
+        len(manifest.get("raw_inputs", [])) + len(manifest.get("artifacts", [])) + 1
     )
     expected_quality = (
         "error",
@@ -257,9 +255,7 @@ def _validate_safe_namespace(capability: dict[str, Any]) -> None:
     }
     for year in range(2020, 2026):
         for dataset in _PHASE5_DATASETS:
-            expected.add(
-                ("phase5", f"{dataset}/year={year}/part.parquet")
-            )
+            expected.add(("phase5", f"{dataset}/year={year}/part.parquet"))
         expected.add(("exposure", f"market_cap/year={year}/part.parquet"))
     actual = {
         (str(item.get("domain")), str(item.get("name")))
@@ -267,7 +263,10 @@ def _validate_safe_namespace(capability: dict[str, Any]) -> None:
         if isinstance(item, dict)
     }
     if actual != expected or len(capability.get("artifacts", [])) != len(expected):
-        raise ValueError("pre-test capability safe artifact namespace is not closed")
+        raise ValueError(
+            "pre-test capability validation failed: "
+            "safe artifact namespace is not closed"
+        )
 
 
 def root_identity(manifest: dict[str, Any]) -> dict[str, object]:

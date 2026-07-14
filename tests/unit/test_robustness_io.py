@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -512,6 +513,19 @@ def _write_manifest(
     *,
     legacy: bool = False,
 ) -> str:
+    if snapshot_type == "research_market":
+        for item in artifacts:
+            name = str(item["name"])
+            if name.startswith(("daily_bar/", "adjustment_factor/", "daily_status/")):
+                expected = f"research/{snapshot_id}/{name}"
+                if (
+                    not re.fullmatch(
+                        r"(?:daily_bar|adjustment_factor|daily_status)/year=[0-9]{4}/part[.]parquet",
+                        name,
+                    )
+                    or item.get("path") != expected
+                ):
+                    raise ValueError("fixture models administrative manifest rejection")
     if legacy:
         path = data_dir / "manifests" / snapshot_id / "manifest.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -557,9 +571,8 @@ def _write_manifest(
                     )
                 )
                 phase5_artifacts.append(
-                    _parquet_artifact(
-                        data_dir, phase5_id, name, frame, root="research"
-                    )
+                    _parquet_artifact(data_dir, phase5_id, name, frame, root="research")
+                )
     exposure_names = {str(item["name"]) for item in exposure_artifacts}
     dummy_frames = {
         "industry_definition.parquet": pd.DataFrame([{"industry_id": "SW:test"}]),
@@ -637,9 +650,7 @@ def _write_manifest(
 def _write_catalog_anchor(data_dir: Path, manifest: dict[str, Any]) -> None:
     reference = manifest["pretest_capability"]
     relative_path = (
-        Path("manifests")
-        / str(manifest["snapshot_id"])
-        / "pretest_capability.json"
+        Path("manifests") / str(manifest["snapshot_id"]) / "pretest_capability.json"
     ).as_posix()
     artifact_id = hashlib.sha256(
         f"report|{relative_path}|{reference['sha256']}".encode()
