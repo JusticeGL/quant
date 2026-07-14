@@ -235,7 +235,7 @@ def test_baseline_run_registration_is_idempotent(tmp_path: Path) -> None:
             """
         ).fetchone()
 
-    assert counts == (1, 1, 2, 2, 2, 7)
+    assert counts == (1, 1, 2, 2, 6, 7)
 
 
 def test_factor_evaluation_registration_is_idempotent(tmp_path: Path) -> None:

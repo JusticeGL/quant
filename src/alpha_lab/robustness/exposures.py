@@ -12,7 +12,11 @@ def calculate_exposures(
     market_cap: pd.DataFrame,
     industries: pd.DataFrame,
     labels: pd.DataFrame,
+    *,
+    size_risk_threshold: float = 0.30,
 ) -> dict[str, object]:
+    if not 0 <= size_risk_threshold <= 1:
+        raise ValueError("size risk threshold must be between zero and one")
     base = _evaluation_rows(scores, labels)
     cap = _prepare_cap(market_cap)
     sized = base.merge(
@@ -46,6 +50,24 @@ def calculate_exposures(
     valid_industry = industry_joined.dropna(
         subset=["score", "label", "industry_id"]
     ).copy()
+    industry_summary = (
+        valid_industry.groupby("industry_id", sort=True)["score"]
+        .agg(observations="size", mean_score="mean")
+        .reset_index()
+    )
+    by_industry = [
+        {
+            "industry_id": str(row.industry_id),
+            "mean_score": float(row.mean_score),
+            "observations": int(row.observations),
+        }
+        for row in industry_summary.itertuples(index=False)
+    ]
+    dispersion = (
+        float(industry_summary["mean_score"].std(ddof=0))
+        if len(industry_summary) >= 2
+        else None
+    )
     sizes = valid_industry.groupby(["trade_date", "industry_id"], sort=False)[
         "score"
     ].transform("count")
@@ -69,8 +91,8 @@ def calculate_exposures(
         "size": {
             "joined_rows": int(len(valid_size)),
             "correlation": size_corr,
-            "risk_threshold": 0.30,
-            "risk_flag": size_corr is not None and abs(size_corr) > 0.30,
+            "risk_threshold": size_risk_threshold,
+            "risk_flag": size_corr is not None and abs(size_corr) > size_risk_threshold,
             "uses": "log(total_market_cap_cny)",
             "method": "daily_cross_sectional_spearman",
             "daily": size_daily,
@@ -83,6 +105,8 @@ def calculate_exposures(
             "neutral_rank_ic": neutral_ic,
             "abs_rank_ic_retention": retention,
             "minimum_group_size": 2,
+            "by_industry": by_industry,
+            "mean_score_dispersion": dispersion,
         },
         "missing": {
             "size_rows": int(len(base) - len(valid_size)),

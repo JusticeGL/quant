@@ -41,12 +41,25 @@ def test_exposures_are_point_in_time_and_leave_missing_rows_missing() -> None:
         }
     )
 
-    report = calculate_exposures(scores, market_cap, industries, labels)
+    report = calculate_exposures(
+        scores,
+        market_cap,
+        industries,
+        labels,
+        size_risk_threshold=1.0,
+    )
 
     assert report["industry"]["joined_rows"] == 4
     assert report["industry"]["neutral_rank_ic"] is not None
     assert report["industry"]["original_joined_rows"] == 4
     assert report["size"]["joined_rows"] == 4
     assert report["size"]["uses"] == "log(total_market_cap_cny)"
+    assert report["size"]["risk_threshold"] == 1.0
+    assert report["size"]["risk_flag"] is False
     assert report["missing"]["industry_rows"] == 1
     assert report["missing"]["size_rows"] == 1
+    assert report["industry"]["by_industry"] == [
+        {"industry_id": "A", "mean_score": 1.5, "observations": 2},
+        {"industry_id": "B", "mean_score": 3.5, "observations": 2},
+    ]
+    assert report["industry"]["mean_score_dispersion"] == 1.0

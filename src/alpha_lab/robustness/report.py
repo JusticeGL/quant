@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import timedelta
+import os
+import tempfile
+from filecmp import cmp
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ from alpha_lab.robustness.exposures import calculate_exposures
 from alpha_lab.robustness.freeze import validate_freeze
 from alpha_lab.robustness.io import read_pretest_exposures, read_pretest_market
 from alpha_lab.robustness.walk_forward import (
+    backtest_predictions,
     build_fold_labels,
     evaluate_gates,
     scale_costs,
@@ -44,7 +47,12 @@ def evaluate_frozen_candidate(
     )
     factor = freeze.get("factor")
     snapshots = freeze.get("snapshots")
-    if not isinstance(factor, dict) or not isinstance(snapshots, dict):
+    policies = freeze.get("policies")
+    if (
+        not isinstance(factor, dict)
+        or not isinstance(snapshots, dict)
+        or not isinstance(policies, dict)
+    ):
         raise ValueError("validated freeze has malformed dependencies")
     factor_id = str(factor["factor_id"])
     if factor_id not in robustness.factor_ids:
@@ -53,10 +61,11 @@ def evaluate_frozen_candidate(
     exposure = snapshots.get("exposure")
     if not isinstance(phase5, dict) or not isinstance(exposure, dict):
         raise ValueError("validated freeze snapshot dependencies are malformed")
+    costs_policy = policies.get("costs")
+    if not isinstance(costs_policy, dict):
+        raise ValueError("validated freeze cost dependency is malformed")
 
-    # The Task 4 readers use an exclusive boundary and deliberately reject the
-    # locked start itself, so the latest admissible request is the preceding day.
-    safe_end_before = robustness.test.start - timedelta(days=1)
+    safe_end_before = robustness.test.start
     market = read_pretest_market(data_dir, str(phase5["snapshot_id"]), safe_end_before)
     market_cap, industries = read_pretest_exposures(
         data_dir, str(exposure["snapshot_id"]), safe_end_before
@@ -128,12 +137,10 @@ def evaluate_frozen_candidate(
             and float(metrics["mean_rank_ic"]) > 0.0,
         }
         fold_reports.append(summary)
-        predictions = evaluated[["trade_date", "instrument", "score", "label"]].rename(
-            columns={"trade_date": "datetime"}
-        )
+        predictions = backtest_predictions(evaluated)
         exposure_scores.append(evaluated[["trade_date", "instrument", "score"]].copy())
         exposure_labels.append(evaluated[["trade_date", "instrument", "label"]].copy())
-        _write_parquet_once(
+        _write_parquet_immutable(
             output_dir / "large" / fold.fold_id / "predictions.parquet", predictions
         )
         for multiplier in robustness.cost_multipliers:
@@ -160,6 +167,7 @@ def evaluate_frozen_candidate(
         market_cap,
         industries,
         pd.concat(exposure_labels, ignore_index=True),
+        size_risk_threshold=robustness.size_correlation_risk_threshold,
     )
     gates = evaluate_gates(fold_reports, cost_report, exposure_report, robustness)
     passed = all(gates.values())
@@ -170,6 +178,18 @@ def evaluate_frozen_candidate(
         "freeze_sha256": freeze["freeze_sha256"],
         "robustness_policy_sha256": policy_sha256,
         "evaluation_policy_sha256": evaluation_sha256,
+        "dependencies": {
+            "phase5_manifest_sha256": phase5["manifest_sha256"],
+            "exposure_manifest_sha256": exposure["manifest_sha256"],
+            "cost_policy_sha256": costs_policy["sha256"],
+            "factor_source_sha256": factor["source_sha256"],
+            "factor_metadata_sha256": factor["metadata_sha256"],
+        },
+        "orientation": {
+            "candidate_direction": candidate.metadata.direction,
+            "score_formula": "score=standardize(winsorize(value*direction))",
+            "direction_consistency_source": "oriented_mean_rank_ic_positive",
+        },
         "test_accessed": False,
     }
     walk_document = {**common, "folds": fold_reports, "gates": gates, "passed": passed}
@@ -208,15 +228,23 @@ def _store_backtest(
     output_dir: Path, fold_id: str, multiplier: float, result: BacktestResult
 ) -> None:
     root = output_dir / "large" / fold_id / f"cost_{_multiplier_key(multiplier)}x"
-    _write_parquet_once(root / "nav.parquet", result.daily)
-    _write_parquet_once(root / "trades.parquet", result.trades)
+    _write_parquet_immutable(root / "nav.parquet", result.daily)
+    _write_parquet_immutable(root / "trades.parquet", result.trades)
 
 
-def _write_parquet_once(path: Path, frame: pd.DataFrame) -> None:
-    if path.exists():
-        return
+def _write_parquet_immutable(path: Path, frame: pd.DataFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_parquet(path, index=False, compression="zstd")
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    os.close(file_descriptor)
+    temporary = Path(temporary_name)
+    try:
+        frame.to_parquet(temporary, index=False, compression="zstd")
+        _fsync_file(temporary)
+        _publish_no_clobber(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _write_json_immutable(path: Path, value: object) -> None:
@@ -234,12 +262,43 @@ def _write_json_immutable(path: Path, value: object) -> None:
 
 
 def _write_immutable(path: Path, content: bytes) -> None:
-    if path.exists():
-        if path.read_bytes() != content:
-            raise RuntimeError(f"immutable robustness artifact differs: {path.name}")
-        return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _publish_no_clobber(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _publish_no_clobber(temporary: Path, path: Path) -> None:
+    try:
+        os.link(temporary, path)
+    except FileExistsError:
+        if not cmp(temporary, path, shallow=False):
+            raise RuntimeError(
+                f"immutable robustness artifact differs: {path.name}"
+            ) from None
+    else:
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
+def _fsync_file(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _markdown(walk: dict[str, Any], exposure: dict[str, Any]) -> bytes:

@@ -56,6 +56,33 @@ def scale_costs(costs: CostConfig, multiplier: float) -> CostConfig:
     return costs.model_copy(update={"rules": rules})
 
 
+def backtest_predictions(evaluated: pd.DataFrame) -> pd.DataFrame:
+    required = {
+        "trade_date",
+        "instrument",
+        "score",
+        "label",
+        "entry_date",
+        "exit_date",
+    }
+    if missing := sorted(required - set(evaluated.columns)):
+        raise ValueError(f"evaluated rows are missing backtest fields: {missing}")
+    valid = evaluated.dropna(
+        subset=["score", "label", "entry_date", "exit_date"]
+    ).copy()
+    valid["datetime"] = pd.to_datetime(valid.pop("trade_date"), errors="raise")
+    valid["entry_date"] = pd.to_datetime(valid["entry_date"], errors="raise")
+    valid["exit_date"] = pd.to_datetime(valid["exit_date"], errors="raise")
+    if not (
+        (valid["datetime"] < valid["entry_date"])
+        & (valid["entry_date"] < valid["exit_date"])
+    ).all():
+        raise ValueError("backtest prediction dates are not strictly ordered")
+    return valid[
+        ["datetime", "instrument", "score", "label", "entry_date", "exit_date"]
+    ].reset_index(drop=True)
+
+
 def evaluate_gates(
     folds: list[dict[str, Any]],
     cost_sensitivity: dict[str, Any],
@@ -63,10 +90,7 @@ def evaluate_gates(
     config: RobustnessConfig,
 ) -> dict[str, bool]:
     """Apply only the four approved Phase 6 pre-test gates."""
-    consistent = sum(
-        item.get("mean_rank_ic") is not None and float(item["mean_rank_ic"]) > 0.0
-        for item in folds
-    )
+    consistent = sum(item.get("direction_consistent") is True for item in folds)
     coverage = all(
         float(item.get("coverage", 0.0)) >= config.minimum_fold_coverage
         for item in folds

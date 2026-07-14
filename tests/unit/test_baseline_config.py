@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -21,11 +22,35 @@ def test_phase2_config_is_locked_and_hashes_are_stable() -> None:
     assert first.costs.rule_for(first.splits.validation.start).commission_assumption
 
 
-def test_cost_policy_rejects_uncovered_date() -> None:
+@pytest.mark.parametrize(
+    ("trade_date", "stamp_sell", "transfer"),
+    [
+        (date(2021, 1, 1), 0.001, 0.00002),
+        (date(2022, 4, 28), 0.001, 0.00002),
+        (date(2022, 4, 29), 0.001, 0.00001),
+        (date(2023, 8, 27), 0.001, 0.00001),
+        (date(2023, 8, 28), 0.0005, 0.00001),
+        (date(2025, 12, 31), 0.0005, 0.00001),
+    ],
+)
+def test_locked_cost_policy_covers_walk_forward_and_boundaries(
+    trade_date: date, stamp_sell: float, transfer: float
+) -> None:
+    config = load_phase2_config(ROOT / "config")
+    rule = config.costs.rule_for(trade_date)
+
+    assert rule.commission_rate == 0.0003
+    assert rule.minimum_commission == 5.0
+    assert rule.stamp_duty_rate_sell == stamp_sell
+    assert rule.transfer_fee_rate_buy == transfer
+    assert rule.transfer_fee_rate_sell == transfer
+
+
+def test_cost_policy_rejects_pre_phase6_uncovered_date() -> None:
     config = load_phase2_config(ROOT / "config")
 
     with pytest.raises(ValueError, match="exactly one cost rule"):
-        config.costs.rule_for(config.costs.rules[0].effective_from.replace(year=2020))
+        config.costs.rule_for(date(2020, 12, 31))
 
 
 def test_pinned_qlib_exposes_exact_alpha158_contract() -> None:

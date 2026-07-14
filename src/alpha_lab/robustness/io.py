@@ -100,7 +100,7 @@ def read_pretest_exposures(
 
 
 def _require_pretest_boundary(end_before: date) -> None:
-    if end_before >= LOCKED_TEST_START:
+    if end_before > LOCKED_TEST_START:
         raise PermissionError(
             "pre-test readers cannot reach the locked test boundary 2026-01-01"
         )

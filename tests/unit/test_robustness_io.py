@@ -18,7 +18,7 @@ LOCKED_START = date(2026, 1, 1)
 
 
 @pytest.mark.parametrize("reader", [read_pretest_market, read_pretest_exposures])
-@pytest.mark.parametrize("end_before", [LOCKED_START, date(2026, 1, 2)])
+@pytest.mark.parametrize("end_before", [date(2026, 1, 2)])
 def test_pretest_reader_rejects_locked_boundary_before_any_data_reader(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -120,9 +120,12 @@ def test_pretest_market_opens_only_canonical_pre2026_parts_and_filters_rows(
 
     monkeypatch.setattr(pd, "read_parquet", guarded)
 
-    result = read_pretest_market(tmp_path, snapshot_id, date(2025, 12, 31))
+    result = read_pretest_market(tmp_path, snapshot_id, LOCKED_START)
 
-    assert result["trade_date"].dt.date.tolist() == [date(2025, 12, 30)]
+    assert result["trade_date"].dt.date.tolist() == [
+        date(2025, 12, 30),
+        date(2025, 12, 31),
+    ]
     assert result.loc[0, "instrument"] == "SH600000"
     assert result.loc[0, "volume"] == 10_000.0
     assert result.loc[0, "amount"] == 101_000.0
@@ -286,13 +289,14 @@ def test_pretest_exposures_skip_locked_market_cap_and_bound_membership(
 
     monkeypatch.setattr(pd, "read_parquet", guarded)
 
-    market_cap, membership = read_pretest_exposures(
-        tmp_path, snapshot_id, date(2025, 12, 31)
-    )
+    market_cap, membership = read_pretest_exposures(tmp_path, snapshot_id, LOCKED_START)
 
-    assert market_cap["trade_date"].dt.date.tolist() == [date(2025, 12, 30)]
+    assert market_cap["trade_date"].dt.date.tolist() == [
+        date(2025, 12, 30),
+        date(2025, 12, 31),
+    ]
     assert membership["industry_id"].tolist() == ["SW:bank"]
-    assert membership.loc[0, "effective_to"] == pd.Timestamp("2025-12-30")
+    assert membership.loc[0, "effective_to"] == pd.Timestamp("2025-12-31")
     assert all("year=2026" not in path for path in opened)
 
 

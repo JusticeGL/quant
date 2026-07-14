@@ -8,6 +8,7 @@ import pandas as pd
 from alpha_lab.baseline.config import CostConfig, CostRule
 from alpha_lab.robustness.config import WalkForwardFold, load_robustness_config
 from alpha_lab.robustness.walk_forward import (
+    backtest_predictions,
     build_fold_labels,
     evaluate_gates,
     scale_costs,
@@ -78,7 +79,11 @@ def test_cost_scaling_includes_every_cost_field() -> None:
 def test_gate_boundaries_are_exact_and_size_risk_is_not_a_gate() -> None:
     config, _ = load_robustness_config(ROOT / "config" / "robustness.yaml")
     folds = [
-        {"mean_rank_ic": value, "coverage": 0.70}
+        {
+            "mean_rank_ic": -99.0,
+            "direction_consistent": value > 0,
+            "coverage": 0.70,
+        }
         for value in (0.01, 0.02, 0.03, 0.04, -0.01)
     ]
     costs = {
@@ -106,3 +111,22 @@ def test_gate_boundaries_are_exact_and_size_risk_is_not_a_gate() -> None:
         evaluate_gates(folds, costs, exposures, config)["double_cost_direction"]
         is False
     )
+
+
+def test_backtest_predictions_require_fold_local_entry_exit_and_label() -> None:
+    evaluated = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2025-12-29", "2025-12-30", "2025-12-31"]),
+            "instrument": ["SH600000"] * 3,
+            "score": [1.0, 2.0, 3.0],
+            "label": [0.01, pd.NA, pd.NA],
+            "entry_date": pd.to_datetime(["2025-12-30", "2025-12-31", None]),
+            "exit_date": pd.to_datetime(["2025-12-31", None, None]),
+        }
+    )
+
+    result = backtest_predictions(evaluated)
+
+    assert result["datetime"].dt.date.tolist() == [date(2025, 12, 29)]
+    assert result["entry_date"].dt.date.tolist() == [date(2025, 12, 30)]
+    assert result["exit_date"].dt.date.tolist() == [date(2025, 12, 31)]
