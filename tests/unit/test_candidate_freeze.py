@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,12 +14,14 @@ import pyarrow.parquet as pq
 import pytest
 import yaml
 
+from alpha_lab.database import catalog
 from alpha_lab.research_data.config import load_research_data_config
 from alpha_lab.robustness import freeze
 from alpha_lab.robustness.freeze import freeze_candidate, validate_freeze
 from alpha_lab.robustness.pretest_capability import build_pretest_capability
 
 ROOT = Path(__file__).resolve().parents[2]
+_ARTIFACT_BYTES_CACHE: dict[str, bytes] = {}
 
 
 @pytest.fixture
@@ -70,6 +74,7 @@ def freeze_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str,
     pointer = data_dir / "state" / "latest_exposure_snapshot.txt"
     pointer.parent.mkdir(parents=True)
     pointer.write_text(f"{exposure_id}\n", encoding="utf-8")
+    _write_catalog_anchor(data_dir, exposure_path)
     monkeypatch.setattr(freeze, "FIXED_PHASE5_SNAPSHOT_ID", phase5_id)
     (repo / ".gitignore").write_text("data/\nexperiments/\n", encoding="utf-8")
     (repo / "runtime.txt").write_text("tracked runtime\n", encoding="utf-8")
@@ -296,6 +301,125 @@ def test_pretest_capability_attacks_fail_before_any_parquet_open(
 
     monkeypatch.setattr(Path, "open", forbidden_open)
     with pytest.raises(ValueError):
+        freeze_candidate(
+            "F1002",
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+            freeze_fixture["experiments"],
+        )
+
+
+def test_coherently_resigned_false_quality_requires_admin_catalog_anchor(
+    freeze_fixture: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _coherently_resign_false_quality(freeze_fixture)
+    real_open = Path.open
+
+    def forbid_parquet(path: Path, *args: object, **kwargs: object) -> object:
+        if path.suffix == ".parquet":
+            raise AssertionError("unanchored capability reached safe Parquet")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", forbid_parquet)
+    with pytest.raises(ValueError, match="catalog"):
+        freeze_candidate(
+            "F1002",
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+            freeze_fixture["experiments"],
+        )
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing_database",
+        "old_schema",
+        "snapshot_type",
+        "snapshot_status",
+        "snapshot_identity",
+        "snapshot_parent",
+        "artifact_path",
+        "artifact_sha",
+        "quality_status",
+        "quality_result",
+    ],
+)
+def test_catalog_anchor_corruption_fails_before_safe_parquet(
+    freeze_fixture: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    database = freeze_fixture["data"] / "metadata.duckdb"
+    if corruption == "missing_database":
+        database.unlink()
+    else:
+        statements = {
+            "old_schema": "DELETE FROM meta.schema_migration WHERE version = 3",
+            "snapshot_type": "UPDATE meta.dataset_snapshot SET snapshot_type = 'forged'",
+            "snapshot_status": "UPDATE meta.dataset_snapshot SET status = 'invalid'",
+            "snapshot_identity": "UPDATE meta.dataset_snapshot SET identity_sha256 = repeat('0', 64)",
+            "snapshot_parent": "UPDATE meta.dataset_snapshot SET parent_snapshot_id = 'p5-forged'",
+            "artifact_path": "UPDATE meta.artifact SET relative_path = 'forged.json' WHERE dataset_name = 'meta.pretest_data_capability'",
+            "artifact_sha": "UPDATE meta.artifact SET sha256 = repeat('0', 64) WHERE dataset_name = 'meta.pretest_data_capability'",
+            "quality_status": "UPDATE meta.dataset_snapshot SET quality_status = 'warning'",
+            "quality_result": "UPDATE meta.quality_result SET status = 'fail' WHERE dataset_name = 'research.exposure_snapshot'",
+        }
+        with duckdb.connect(str(database)) as connection:
+            connection.execute(statements[corruption])
+    real_open = Path.open
+
+    def forbid_parquet(path: Path, *args: object, **kwargs: object) -> object:
+        if path.suffix == ".parquet":
+            raise AssertionError("bad catalog anchor reached safe Parquet")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", forbid_parquet)
+    with pytest.raises(ValueError, match="catalog"):
+        freeze_candidate(
+            "F1002",
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+            freeze_fixture["experiments"],
+        )
+
+
+def test_anchored_capability_rejects_actual_parquet_row_count_mismatch(
+    freeze_fixture: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = _coherently_resign_false_quality(freeze_fixture)
+    _write_catalog_anchor(freeze_fixture["data"], manifest_path)
+
+    def forbidden_data_read(*args: object, **kwargs: object) -> object:
+        raise AssertionError("row-count validation must use Parquet metadata only")
+
+    monkeypatch.setattr(pd, "read_parquet", forbidden_data_read)
+    monkeypatch.setattr(pq, "read_table", forbidden_data_read)
+    with pytest.raises(ValueError, match="row count"):
+        freeze_candidate(
+            "F1002",
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+            freeze_fixture["experiments"],
+        )
+
+
+def test_coherently_resigned_missing_safe_partition_is_rejected(
+    freeze_fixture: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = _coherently_resign_false_quality(
+        freeze_fixture, remove_partition=True
+    )
+    _write_catalog_anchor(freeze_fixture["data"], manifest_path)
+    real_open = Path.open
+
+    def forbid_parquet(path: Path, *args: object, **kwargs: object) -> object:
+        if path.suffix == ".parquet":
+            raise AssertionError("incomplete namespace reached safe Parquet")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", forbid_parquet)
+    with pytest.raises(ValueError, match="namespace"):
         freeze_candidate(
             "F1002",
             freeze_fixture["config"],
@@ -694,10 +818,12 @@ def _write_phase5_snapshot(data_dir: Path, config_dir: Path) -> Path:
         "index_membership.parquet",
         "suspension.parquet",
         "universe_dates.parquet",
-        "daily_bar/year=2025/part.parquet",
-        "adjustment_factor/year=2025/part.parquet",
-        "daily_status/year=2025/part.parquet",
     ]
+    names.extend(
+        f"{dataset}/year={year}/part.parquet"
+        for dataset in ("daily_bar", "adjustment_factor", "daily_status")
+        for year in range(2020, 2026)
+    )
     artifact_identities = [_artifact_identity(name) for name in sorted(names)]
     config = load_research_data_config(config_dir)
     identity = {
@@ -749,14 +875,17 @@ def _write_exposure_snapshot(
     quality_bytes = _canonical_json_bytes(quality)
     raw_bytes = b"phase6 raw fixture"
     raw_identity = _raw_identity("b", raw_bytes)
+    exposure_names = [
+        "industry_definition.parquet",
+        "industry_membership.parquet",
+        "industry_membership_pretest.parquet",
+    ]
+    exposure_names.extend(
+        f"market_cap/year={year}/part.parquet" for year in range(2020, 2026)
+    )
     artifact_identities = [
         _artifact_identity(name)
-        for name in (
-            "industry_definition.parquet",
-            "industry_membership.parquet",
-            "industry_membership_pretest.parquet",
-            "market_cap/year=2025/part.parquet",
-        )
+        for name in exposure_names
     ]
     coverage_scope = {
         "start_date": "2020-01-01",
@@ -994,6 +1123,103 @@ def _republish_exposure_snapshot(
     return new_manifest_path
 
 
+def _coherently_resign_false_quality(
+    fixture: dict[str, Path], *, remove_partition: bool = False
+) -> Path:
+    data_dir = fixture["data"]
+    old_manifest_path = fixture["exposure_manifest"]
+    root = json.loads(old_manifest_path.read_text(encoding="utf-8"))
+    capability_path = old_manifest_path.parent / "pretest_capability.json"
+    capability = json.loads(capability_path.read_text(encoding="utf-8"))
+    target = (
+        next(
+            item
+            for item in capability["artifacts"]
+            if item["domain"] == "phase5"
+            and item["name"] == "daily_bar/year=2020/part.parquet"
+        )
+        if remove_partition
+        else capability["artifacts"][0]
+    )
+    delta = -int(target["row_count"]) if remove_partition else 999
+    if remove_partition:
+        capability["artifacts"].remove(target)
+        capability["quality"]["summary"]["artifact_count"] -= 1
+    else:
+        target["row_count"] += delta
+    capability["quality"]["summary"]["row_count"] += delta
+    summary_key = (
+        "phase5_row_count"
+        if target["domain"] == "phase5"
+        else "exposure_row_count"
+    )
+    capability["quality"]["summary"][summary_key] += delta
+    identity = {
+        key: value
+        for key, value in capability.items()
+        if key not in {"capability_id", "identity_sha256"}
+    }
+    capability_identity = hashlib.sha256(
+        _canonical_json_bytes(identity)
+    ).hexdigest()
+    capability["identity_sha256"] = capability_identity
+    capability["capability_id"] = f"pretest-{capability_identity[:20]}"
+    capability_content = _canonical_json_bytes(capability)
+    root["pretest_capability"] = {
+        "path": "pretest_capability.json",
+        "sha256": hashlib.sha256(capability_content).hexdigest(),
+        "capability_id": capability["capability_id"],
+    }
+    root_identity = {
+        "exposure_schema_version": root["schema_version"],
+        "phase5_manifest_sha256": root["phase5_manifest_sha256"],
+        "policy_sha256": root["policy_sha256"],
+        "quality_report_sha256": root["quality_report"]["sha256"],
+        "coverage_scope": root["coverage_scope"],
+        "raw_request_identities": [
+            {
+                key: item[key]
+                for key in (
+                    "api_name",
+                    "request_sha256",
+                    "sha256",
+                    "row_count",
+                    "params",
+                    "fields",
+                )
+            }
+            for item in root["raw_inputs"]
+        ],
+        "artifacts": [
+            {key: item[key] for key in ("name", "sha256", "row_count")}
+            for item in root["artifacts"]
+        ],
+        "pretest_capability": root["pretest_capability"],
+    }
+    root_digest = hashlib.sha256(_canonical_json_bytes(root_identity)).hexdigest()
+    old_id = root["snapshot_id"]
+    new_id = f"p6x-{root_digest[:20]}"
+    shutil.copytree(
+        data_dir / "exposures" / old_id,
+        data_dir / "exposures" / new_id,
+    )
+    root["snapshot_id"] = new_id
+    root["identity_sha256"] = root_digest
+    for item in root["artifacts"]:
+        item["path"] = f"exposures/{new_id}/{item['name']}"
+    root["quality_report"]["path"] = f"manifests/{new_id}/quality_report.json"
+    manifest_dir = data_dir / "manifests" / new_id
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "manifest.json").write_bytes(_canonical_json_bytes(root))
+    (manifest_dir / "pretest_capability.json").write_bytes(capability_content)
+    old_quality = data_dir / "manifests" / old_id / "quality_report.json"
+    shutil.copyfile(old_quality, manifest_dir / "quality_report.json")
+    (data_dir / "state" / "latest_exposure_snapshot.txt").write_text(
+        f"{new_id}\n", encoding="utf-8"
+    )
+    return manifest_dir / "manifest.json"
+
+
 def _raw_identity(prefix: str, content: bytes) -> dict[str, object]:
     return {
         "api_name": "fixture",
@@ -1005,6 +1231,63 @@ def _raw_identity(prefix: str, content: bytes) -> dict[str, object]:
     }
 
 
+def _write_catalog_anchor(data_dir: Path, manifest_path: Path) -> None:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    reference = manifest["pretest_capability"]
+    relative_path = (
+        Path("manifests")
+        / manifest["snapshot_id"]
+        / "pretest_capability.json"
+    ).as_posix()
+    artifact_id = hashlib.sha256(
+        f"report|{relative_path}|{reference['sha256']}".encode()
+    ).hexdigest()
+    database_path = data_dir / "metadata.duckdb"
+    catalog.initialize_database(database_path)
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO meta.dataset_snapshot
+                (snapshot_id, snapshot_type, status, identity_sha256,
+                 schema_version, quality_status, parent_snapshot_id)
+            VALUES (?, 'point_in_time_exposure', 'valid', ?, 1, 'pass', ?)
+            """,
+            [
+                manifest["snapshot_id"],
+                manifest["identity_sha256"],
+                manifest["phase5_snapshot_id"],
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO meta.artifact
+                (artifact_id, layer, dataset_name, relative_path, format,
+                 sha256, schema_version, immutable)
+            VALUES (?, 'report', 'meta.pretest_data_capability', ?, 'json',
+                    ?, 1, true)
+            """,
+            [artifact_id, relative_path, reference["sha256"]],
+        )
+        connection.execute(
+            """
+            INSERT INTO meta.snapshot_artifact
+                (snapshot_id, artifact_id, dataset_name)
+            VALUES (?, ?, 'meta.pretest_data_capability')
+            """,
+            [manifest["snapshot_id"], artifact_id],
+        )
+        connection.execute(
+            """
+            INSERT INTO meta.quality_result
+                (snapshot_id, dataset_name, check_name, severity, status,
+                 observed_value, threshold_value, affected_rows)
+            VALUES (?, 'research.exposure_snapshot', 'manifest_and_artifacts',
+                    'error', 'pass', 1, 1, 0)
+            """,
+            [manifest["snapshot_id"]],
+        )
+
+
 def _artifact_identity(name: str) -> dict[str, object]:
     return {
         "name": name,
@@ -1014,7 +1297,46 @@ def _artifact_identity(name: str) -> dict[str, object]:
 
 
 def _artifact_bytes(name: str) -> bytes:
-    return f"fixture:{name}".encode()
+    cached = _ARTIFACT_BYTES_CACHE.get(name)
+    if cached is not None:
+        return cached
+    if re.fullmatch(
+        r"(?:daily_bar|adjustment_factor|daily_status|market_cap)/year=[0-9]{4}/part[.]parquet",
+        name,
+    ):
+        year = int(name.split("year=")[1].split("/")[0])
+        frame = pd.DataFrame(
+            [
+                {
+                    "trade_date": pd.Timestamp(f"{year}-01-02"),
+                    "security_id": "CN:SSE:600000",
+                    "known_at": pd.Timestamp(f"{year}-01-02", tz="UTC"),
+                }
+            ]
+        )
+    elif name == "industry_definition.parquet":
+        frame = pd.DataFrame([{"industry_id": "CN:SW2021:801010.SI"}])
+    elif name == "industry_membership_pretest.parquet":
+        frame = pd.DataFrame(
+            [
+                {
+                    "industry_id": "CN:SW2021:801010.SI",
+                    "security_id": "CN:SSE:600000",
+                    "effective_from": pd.Timestamp("2020-01-01"),
+                    "effective_to": pd.Timestamp("2025-12-31"),
+                    "known_at": pd.Timestamp("2020-01-01", tz="UTC"),
+                }
+            ]
+        )
+    else:
+        content = f"fixture:{name}".encode()
+        _ARTIFACT_BYTES_CACHE[name] = content
+        return content
+    buffer = io.BytesIO()
+    frame.to_parquet(buffer, index=False)
+    content = buffer.getvalue()
+    _ARTIFACT_BYTES_CACHE[name] = content
+    return content
 
 
 def _phase5_quality() -> dict[str, object]:

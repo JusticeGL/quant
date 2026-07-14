@@ -6,6 +6,9 @@ import re
 from pathlib import Path
 from typing import Any, cast
 
+import duckdb
+import pyarrow.parquet as pq
+
 PRETEST_CAPABILITY_SCHEMA_VERSION = 1
 PRETEST_CUTOFF = "2026-01-01"
 _PHASE5_DATASETS = ("daily_bar", "adjustment_factor", "daily_status")
@@ -43,6 +46,7 @@ def build_pretest_capability(
         for item in artifacts
     ):
         raise ValueError("pre-test capability is missing an exposure dataset")
+    _validate_safe_namespace({"artifacts": artifacts})
     summary = {
         "artifact_count": len(artifacts),
         "row_count": sum(cast(int, item["row_count"]) for item in artifacts),
@@ -111,6 +115,8 @@ def validate_pretest_capability(
     capability = _canonical_document(capability_path, "pre-test capability")
     _validate_capability_document(capability, manifest, reference)
     _validate_root_identity(manifest)
+    _validate_safe_namespace(capability)
+    _validate_catalog_anchor(data_dir, manifest, reference)
     for item in capability["artifacts"]:
         root = "research" if item["domain"] == "phase5" else "exposures"
         parent = (
@@ -129,7 +135,125 @@ def validate_pretest_capability(
                 "pre-test capability artifact checksum mismatch: "
                 f"{item['domain']}:{item['name']}"
             )
+        try:
+            actual_rows = pq.ParquetFile(path).metadata.num_rows
+        except (OSError, ValueError) as error:
+            raise ValueError(
+                "pre-test capability artifact is not valid Parquet: "
+                f"{item['domain']}:{item['name']}"
+            ) from error
+        if actual_rows != item["row_count"]:
+            raise ValueError(
+                "pre-test capability artifact row count mismatch: "
+                f"{item['domain']}:{item['name']}"
+            )
     return manifest, capability
+
+
+def _validate_catalog_anchor(
+    data_dir: Path, manifest: dict[str, Any], reference: dict[str, Any]
+) -> None:
+    database_path = data_dir / "metadata.duckdb"
+    if _contains_symlink(database_path, data_dir) or not database_path.is_file():
+        raise ValueError("pre-test capability catalog anchor is missing or untrusted")
+    snapshot_id = str(manifest["snapshot_id"])
+    expected_capability_path = (
+        Path("manifests") / snapshot_id / "pretest_capability.json"
+    ).as_posix()
+    try:
+        with duckdb.connect(str(database_path), read_only=True) as connection:
+            versions = connection.execute(
+                "SELECT version FROM meta.schema_migration ORDER BY version"
+            ).fetchall()
+            snapshot_rows = connection.execute(
+                """
+                SELECT snapshot_type, status, identity_sha256,
+                       quality_status, parent_snapshot_id
+                FROM meta.dataset_snapshot
+                WHERE snapshot_id = ?
+                """,
+                [snapshot_id],
+            ).fetchall()
+            capability_rows = connection.execute(
+                """
+                SELECT sa.dataset_name, a.dataset_name, a.relative_path,
+                       a.sha256, a.format, a.immutable
+                FROM meta.snapshot_artifact AS sa
+                JOIN meta.artifact AS a USING (artifact_id)
+                WHERE sa.snapshot_id = ?
+                  AND (
+                    sa.dataset_name = 'meta.pretest_data_capability'
+                    OR a.dataset_name = 'meta.pretest_data_capability'
+                  )
+                """,
+                [snapshot_id],
+            ).fetchall()
+            quality_rows = connection.execute(
+                """
+                SELECT severity, status, observed_value, threshold_value,
+                       affected_rows
+                FROM meta.quality_result
+                WHERE snapshot_id = ?
+                  AND dataset_name = 'research.exposure_snapshot'
+                  AND check_name = 'manifest_and_artifacts'
+                """,
+                [snapshot_id],
+            ).fetchall()
+    except (duckdb.Error, OSError) as error:
+        raise ValueError("pre-test capability catalog anchor is invalid") from error
+    if not versions or max(int(row[0]) for row in versions) < 3:
+        raise ValueError("pre-test capability catalog schema is older than version 3")
+    expected_snapshot = (
+        "point_in_time_exposure",
+        "valid",
+        manifest.get("identity_sha256"),
+        "pass",
+        manifest.get("phase5_snapshot_id"),
+    )
+    if len(snapshot_rows) != 1 or tuple(snapshot_rows[0]) != expected_snapshot:
+        raise ValueError("pre-test capability catalog snapshot anchor mismatch")
+    expected_artifact = (
+        "meta.pretest_data_capability",
+        "meta.pretest_data_capability",
+        expected_capability_path,
+        reference.get("sha256"),
+        "json",
+        True,
+    )
+    if len(capability_rows) != 1 or tuple(capability_rows[0]) != expected_artifact:
+        raise ValueError("pre-test capability catalog artifact anchor mismatch")
+    if len(quality_rows) != 1:
+        raise ValueError("pre-test capability catalog quality anchor is missing")
+    severity, status, observed, threshold, affected = quality_rows[0]
+    if (
+        severity != "error"
+        or status != "pass"
+        or affected != 0
+        or observed is None
+        or threshold is None
+        or float(observed) != float(threshold)
+    ):
+        raise ValueError("pre-test capability catalog quality anchor mismatch")
+
+
+def _validate_safe_namespace(capability: dict[str, Any]) -> None:
+    expected: set[tuple[str, str]] = {
+        ("exposure", "industry_definition.parquet"),
+        ("exposure", "industry_membership_pretest.parquet"),
+    }
+    for year in range(2020, 2026):
+        for dataset in _PHASE5_DATASETS:
+            expected.add(
+                ("phase5", f"{dataset}/year={year}/part.parquet")
+            )
+        expected.add(("exposure", f"market_cap/year={year}/part.parquet"))
+    actual = {
+        (str(item.get("domain")), str(item.get("name")))
+        for item in capability.get("artifacts", [])
+        if isinstance(item, dict)
+    }
+    if actual != expected or len(capability.get("artifacts", [])) != len(expected):
+        raise ValueError("pre-test capability safe artifact namespace is not closed")
 
 
 def root_identity(manifest: dict[str, Any]) -> dict[str, object]:

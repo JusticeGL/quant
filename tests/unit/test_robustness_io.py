@@ -11,6 +11,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
+from alpha_lab.database import catalog
 from alpha_lab.robustness import io as robustness_io
 from alpha_lab.robustness.io import read_pretest_exposures, read_pretest_market
 from alpha_lab.robustness.pretest_capability import (
@@ -533,30 +534,34 @@ def _write_manifest(
     phase5_artifacts = artifacts if snapshot_type == "research_market" else []
     exposure_artifacts = artifacts if snapshot_type == "point_in_time_exposure" else []
     for dataset in ("daily_bar", "adjustment_factor", "daily_status"):
-        if not any(
-            str(item["name"]).startswith(f"{dataset}/") for item in phase5_artifacts
-        ):
-            frame = pd.DataFrame(
-                [
-                    {
-                        "trade_date": pd.Timestamp("2025-01-02"),
-                        "security_id": "CN:SSE:600000",
-                        "known_at": pd.Timestamp("2025-01-02", tz="UTC"),
-                    }
-                ]
-            )
-            phase5_artifacts.append(
-                _parquet_artifact(
-                    data_dir,
-                    phase5_id,
-                    f"{dataset}/year=2025/part.parquet",
-                    frame,
-                    root="research",
+        for year in range(2020, 2026):
+            name = f"{dataset}/year={year}/part.parquet"
+            if not any(str(item["name"]) == name for item in phase5_artifacts):
+                frame = (
+                    pd.DataFrame(
+                        [
+                            {
+                                "trade_date": pd.Timestamp("2025-01-02"),
+                                "security_id": "CN:SSE:600000",
+                                "known_at": pd.Timestamp("2025-01-02", tz="UTC"),
+                            }
+                        ]
+                    )
+                    if year == 2025
+                    else pd.DataFrame(
+                        {
+                            "trade_date": pd.Series(dtype="datetime64[ns]"),
+                            "security_id": pd.Series(dtype="object"),
+                            "known_at": pd.Series(dtype="datetime64[ns, UTC]"),
+                        }
+                    )
                 )
-            )
+                phase5_artifacts.append(
+                    _parquet_artifact(
+                        data_dir, phase5_id, name, frame, root="research"
+                    )
     exposure_names = {str(item["name"]) for item in exposure_artifacts}
     dummy_frames = {
-        "market_cap/year=2025/part.parquet": pd.DataFrame([_market_cap("2025-01-02")]),
         "industry_definition.parquet": pd.DataFrame([{"industry_id": "SW:test"}]),
         "industry_membership_pretest.parquet": pd.DataFrame(
             [
@@ -567,6 +572,14 @@ def _write_manifest(
             ]
         ),
     }
+    for year in range(2020, 2026):
+        dummy_frames[f"market_cap/year={year}/part.parquet"] = pd.DataFrame(
+            {
+                "trade_date": pd.Series(dtype="datetime64[ns]"),
+                "security_id": pd.Series(dtype="object"),
+                "known_at": pd.Series(dtype="datetime64[ns, UTC]"),
+            }
+        )
     for name, frame in dummy_frames.items():
         if name not in exposure_names:
             temporary = _parquet_artifact(
@@ -617,4 +630,61 @@ def _write_manifest(
         json.dumps(root, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
     )
+    _write_catalog_anchor(data_dir, root)
     return root_id
+
+
+def _write_catalog_anchor(data_dir: Path, manifest: dict[str, Any]) -> None:
+    reference = manifest["pretest_capability"]
+    relative_path = (
+        Path("manifests")
+        / str(manifest["snapshot_id"])
+        / "pretest_capability.json"
+    ).as_posix()
+    artifact_id = hashlib.sha256(
+        f"report|{relative_path}|{reference['sha256']}".encode()
+    ).hexdigest()
+    database_path = data_dir / "metadata.duckdb"
+    catalog.initialize_database(database_path)
+    with duckdb.connect(str(database_path)) as connection:
+        connection.execute(
+            """
+            INSERT INTO meta.dataset_snapshot
+                (snapshot_id, snapshot_type, status, identity_sha256,
+                 schema_version, quality_status, parent_snapshot_id)
+            VALUES (?, 'point_in_time_exposure', 'valid', ?, 1, 'pass', ?)
+            """,
+            [
+                manifest["snapshot_id"],
+                manifest["identity_sha256"],
+                manifest["phase5_snapshot_id"],
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO meta.artifact
+                (artifact_id, layer, dataset_name, relative_path, format,
+                 sha256, schema_version, immutable)
+            VALUES (?, 'report', 'meta.pretest_data_capability', ?, 'json',
+                    ?, 1, true)
+            """,
+            [artifact_id, relative_path, reference["sha256"]],
+        )
+        connection.execute(
+            """
+            INSERT INTO meta.snapshot_artifact
+                (snapshot_id, artifact_id, dataset_name)
+            VALUES (?, ?, 'meta.pretest_data_capability')
+            """,
+            [manifest["snapshot_id"], artifact_id],
+        )
+        connection.execute(
+            """
+            INSERT INTO meta.quality_result
+                (snapshot_id, dataset_name, check_name, severity, status,
+                 observed_value, threshold_value, affected_rows)
+            VALUES (?, 'research.exposure_snapshot', 'manifest_and_artifacts',
+                    'error', 'pass', 1, 1, 0)
+            """,
+            [manifest["snapshot_id"]],
+        )

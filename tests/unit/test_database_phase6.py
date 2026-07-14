@@ -19,6 +19,7 @@ from alpha_lab.robustness.exposure_data import (
     normalize_market_cap,
 )
 from alpha_lab.robustness.exposure_snapshot import materialize_exposure_snapshot
+from alpha_lab.robustness.pretest_capability import validate_pretest_capability
 
 ROOT = Path(__file__).resolve().parents[2]
 ROBUSTNESS_TABLES = {
@@ -194,10 +195,15 @@ def test_exposure_snapshot_sync_is_bulk_and_idempotent(tmp_path: Path) -> None:
 
     catalog.sync_exposure_snapshot(database_path, data_dir, exposure.manifest_path)
     first = _exposure_counts(database_path, exposure.snapshot_id)
+    anchored_root, anchored_capability = validate_pretest_capability(
+        data_dir, exposure.snapshot_id
+    )
     catalog.sync_exposure_snapshot(database_path, data_dir, exposure.manifest_path)
     second = _exposure_counts(database_path, exposure.snapshot_id)
 
-    assert first == second == (1, 1, 1, 2, 1)
+    assert first == second == (1, 1, 1, 7, 1)
+    assert anchored_root["snapshot_id"] == exposure.snapshot_id
+    assert anchored_capability["quality"]["status"] == "pass"
     with duckdb.connect(str(database_path), read_only=True) as connection:
         market_table_count = connection.execute(
             """
@@ -878,6 +884,12 @@ def _write_phase5_fixture(data_dir: Path) -> Path:
         "adjustment_factor/year=2021/part.parquet": dated_safe,
         "daily_status/year=2021/part.parquet": dated_safe,
     }
+    empty_dated = dated_safe.iloc[0:0].copy()
+    for dataset in ("daily_bar", "adjustment_factor", "daily_status"):
+        for year in range(2020, 2026):
+            frames.setdefault(
+                f"{dataset}/year={year}/part.parquet", empty_dated
+            )
     artifacts: list[dict[str, object]] = []
     for name, frame in frames.items():
         path = research / name

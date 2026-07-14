@@ -310,23 +310,17 @@ def validate_exposure_snapshot(data_dir: Path, snapshot_id: str) -> dict[str, ob
 def _write_tables(root: Path, tables: ExposureTables) -> list[dict[str, object]]:
     artifacts: list[dict[str, object]] = []
     market = tables.market_cap
-    if market.empty:
+    years = pd.to_datetime(market["trade_date"], errors="raise").dt.year
+    publication_years = sorted(set(years.unique()) | set(range(2020, 2026)))
+    for year in publication_years:
         artifacts.append(
             _write_frame(
-                root, "market_cap/part.parquet", market, ["trade_date", "security_id"]
+                root,
+                f"market_cap/year={int(year)}/part.parquet",
+                market.loc[years == year].copy(),
+                ["trade_date", "security_id"],
             )
         )
-    else:
-        years = pd.to_datetime(market["trade_date"], errors="raise").dt.year
-        for year in sorted(years.unique()):
-            artifacts.append(
-                _write_frame(
-                    root,
-                    f"market_cap/year={int(year)}/part.parquet",
-                    market.loc[years == year].copy(),
-                    ["trade_date", "security_id"],
-                )
-            )
     artifacts.append(
         _write_frame(
             root,
@@ -427,12 +421,12 @@ def _artifact_layout_failures(data_dir: Path, manifest: dict[str, Any]) -> list[
                 context["observations"]["trade_date"], errors="raise"
             ).dt.year
         )
-        if {year for year, _ in market_items} != expected_years:
+        if not expected_years.issubset({year for year, _ in market_items}):
             raise ValueError("market partition years are incomplete")
         for year, item in market_items:
             frame = _read_verified_frame(data_dir, item)
             row_years = set(pd.to_datetime(frame["trade_date"], errors="raise").dt.year)
-            if row_years != {year}:
+            if row_years and row_years != {year}:
                 raise ValueError("market row year mismatches partition")
         snapshot_dir = data_dir / "exposures" / snapshot_id
         actual_files = {

@@ -184,6 +184,8 @@ def _pretest_partition_artifacts(
         year = int(match.group(1))
         if year >= LOCKED_TEST_START.year:
             continue
+        if item.get("row_count") == 0:
+            continue
         selected[dataset].append(
             _verified_artifact_path(
                 data_dir, item, snapshot_id, root=root, expected_name=name

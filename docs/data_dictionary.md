@@ -93,6 +93,11 @@ SHA256。
 安全 artifact 哈希和行数；不含完整行业成员、完整质量报告、raw cache 或
 2026 统计。p6x 根 manifest 的 `pretest_capability` 引用参与根身份计算。
 
+预测试使用前还必须在 `data/metadata.duckdb` 找到 Task 3 写入的独立管理锚：
+精确的有效 p6x 快照身份/父快照、唯一 capability artifact 路径与 SHA，以及
+通过的管理质量记录。之后才允许读取安全 Parquet footer，并核对实际行数及
+2020-2025 封闭分区集合；缺失或不一致时在打开 Parquet 前失败。
+
 Catalog 同步在 Task 2 验证后记录 manifest SHA256，并在 DuckDB 写锁与
 事务内重读 manifest、比较 SHA256，然后对 market-cap、raw、quality、
 industry 与必需 Phase 5 依赖的当前文件字节逐一重算 SHA256。登记的

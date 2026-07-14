@@ -116,6 +116,15 @@ The canonical capability is registered as `meta.pretest_data_capability` (JSON
 in the report layer) and its physical bytes participate in the final pre-commit
 TOCTOU seal. It is metadata only and does not duplicate market facts.
 
+This registration is also the independent pre-test authorization anchor.
+Freeze and pre-test readers open `data/metadata.duckdb` read-only and require
+schema version 3+, one exact `meta.dataset_snapshot` row (`valid`, passing
+quality, exact identity and Phase 5 parent), one uniquely linked
+`meta.pretest_data_capability` JSON artifact with exact path/SHA, and the
+passing `research.exposure_snapshot / manifest_and_artifacts` quality row.
+Anchor failure occurs before safe Parquet access. After attestation, Parquet
+footer row counts and the closed 2020-2025 safe partition namespace are checked.
+
 Small Phase 5 reference artifacts, their quality report and Phase 6 industry
 artifacts are hashed and parsed from the same in-memory byte buffer, so derived
 catalog rows cannot come from bytes different from the verified digest. After

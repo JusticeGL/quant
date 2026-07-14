@@ -262,6 +262,12 @@ paths validate only that capability and its safe artifact list. Full roots and
 full quality reports remain publication/catalog inputs and future approved
 Task 6 final-test inputs only.
 
+Before safe artifact access, Task 4/5 also read `data/metadata.duckdb` in
+read-only mode and require the exact Task 3 catalog attestation for the p6x root
+and unique capability artifact plus passing administrative quality. They then
+validate the closed 2020-2025 safe partition set and Parquet footer row counts.
+Missing/old/mismatched catalog state fails closed before Parquet access.
+
 - [ ] **Step 1: Write failing locked-read tests**
 
 ```python

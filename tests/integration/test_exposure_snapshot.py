@@ -23,7 +23,6 @@ from alpha_lab.robustness.exposure_snapshot import (
     materialize_exposure_snapshot,
     validate_exposure_snapshot,
 )
-from alpha_lab.robustness.pretest_capability import validate_pretest_capability
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -110,8 +109,6 @@ def test_exposure_snapshot_is_deterministic_and_validated_before_pointer(
     ).read_text().strip() == first.snapshot_id
     validation = validate_exposure_snapshot(tmp_path, first.snapshot_id)
     assert validation["healthy"] is True
-    root, capability = validate_pretest_capability(tmp_path, first.snapshot_id)
-    assert root["pretest_capability"]["capability_id"] == capability["capability_id"]
     manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
     assert first.manifest_path == (
         tmp_path / "manifests" / first.snapshot_id / "manifest.json"
@@ -733,6 +730,21 @@ def _phase5_fixture(tmp_path: Path) -> Path:
                 }
             ]
         ).to_parquet(path, index=False)
+    phase5_artifacts = [security, membership, universe, daily, daily_2026]
+    empty_dated = pd.DataFrame(
+        {
+            "trade_date": pd.Series(dtype="datetime64[ns]"),
+            "security_id": pd.Series(dtype="object"),
+            "known_at": pd.Series(dtype="datetime64[ns, UTC]"),
+        }
+    )
+    for dataset in ("daily_bar", "adjustment_factor", "daily_status"):
+        for year in range(2020, 2026):
+            artifact = research / dataset / f"year={year}" / "part.parquet"
+            if not artifact.exists():
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                empty_dated.to_parquet(artifact, index=False)
+            phase5_artifacts.append(artifact)
     manifest_dir = tmp_path / "manifests" / "p5-ecaa6e8aeae6b9f8fb25"
     manifest_dir.mkdir(parents=True)
     manifest = {
@@ -745,15 +757,7 @@ def _phase5_fixture(tmp_path: Path) -> Path:
                 "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 "row_count": 1,
             }
-            for artifact in (
-                security,
-                membership,
-                universe,
-                daily,
-                daily_2026,
-                adjustment,
-                status,
-            )
+            for artifact in dict.fromkeys(phase5_artifacts)
         ],
     }
     path = manifest_dir / "manifest.json"

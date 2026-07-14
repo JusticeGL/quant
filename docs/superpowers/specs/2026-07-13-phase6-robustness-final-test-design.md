@@ -55,6 +55,19 @@ identity as opaque parent metadata, but cannot open either full quality report,
 the Phase 5 root, raw cache, a 2026 partition, or full membership. Both readers
 are located by the root p6x ID; there is no Phase 5-manifest fallback.
 
+The pure pre-test validator additionally requires the Task 3 administrative
+catalog at `data/metadata.duckdb` as an independent trust anchor. It opens the
+database read-only, requires schema version 3 or newer, and matches the exact
+valid p6x snapshot type, root identity, Phase 5 parent, passing administrative
+quality result, and the unique linked `meta.pretest_data_capability` artifact
+path/SHA. Missing or mismatched catalog state fails before any safe Parquet is
+opened. Only after this attestation does it hash the safe artifacts and compare
+their declared row counts with Parquet footer `num_rows`. The safe namespace is
+closed: each of daily-bar, adjustment-factor, daily-status and market-cap has
+exactly one partition for every year 2020-2025, plus the two fixed industry
+artifacts. No Phase 5 root/full quality, p6x full quality/raw/full membership,
+or 2026 partition is opened.
+
 The immutable exposure snapshot ID is `p6x-<identity-prefix>`. Its identity
 includes the Phase 5 manifest hash, every raw exposure artifact hash, the
 exposure configuration hash, and the schema version. Daily market-cap facts and
