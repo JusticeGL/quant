@@ -36,6 +36,15 @@ industries. Industry membership requires
   missing fields, truncation, duplicate keys, interval overlaps, unknown
   securities, or inadequate coverage stop publication.
 - Current industry values are never used to backfill history.
+- A non-empty historical membership that cannot be mapped through the SW2021
+  L2 hierarchy may use a code-only bridge from the same Tushare
+  `index_classify` endpoint. The publisher acquires immutable SW2014 L1/L2/L3
+  artifacts, validates L3 index-code to L2 industry-code to L1 industry-code,
+  and accepts the result only when the SW2014 L1 index code uniquely exists in
+  the SW2021 L1 dictionary. If both membership L3 and L2 paths exist they must
+  agree. Names are never used; missing, ambiguous or conflicting links fail
+  closed. Each bridged interval records source/target taxonomy and mapping
+  provenance, and quality reports disclose the bridge count.
 
 On 2026-07-14 the user explicitly approved a minimum 98% industry-observation
 coverage policy for the historical pre-test input. Coverage is measured over

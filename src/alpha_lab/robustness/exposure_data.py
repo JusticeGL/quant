@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Protocol
@@ -37,6 +38,7 @@ INDEX_CLASSIFY_L2_FIELDS = (
     "parent_code",
     "src",
 )
+INDEX_CLASSIFY_L3_FIELDS = INDEX_CLASSIFY_L2_FIELDS
 INDUSTRY_MEMBER_FIELDS = (
     "l1_code",
     "l1_name",
@@ -61,6 +63,14 @@ class QueryProvider(Protocol):
         params: Mapping[str, object],
         fields: tuple[str, ...],
     ) -> TushareQueryResult: ...
+
+
+@dataclass(frozen=True)
+class HistoricalTaxonomyBridge:
+    l2_to_stable_l1: Mapping[str, str]
+    l3_to_stable_l1: Mapping[str, str]
+    source_version: str = "SW2014"
+    target_version: str = "SW2021"
 
 
 def normalize_market_cap(
@@ -186,6 +196,66 @@ def normalize_industry_l2_mapping(
     return dict(zip(pairs["l2_code"], pairs["l1_code"], strict=True))
 
 
+def normalize_historical_taxonomy_bridge(
+    raw_l1: pd.DataFrame,
+    raw_l2: pd.DataFrame,
+    raw_l3: pd.DataFrame,
+    definitions: pd.DataFrame,
+) -> HistoricalTaxonomyBridge:
+    """Bridge historical SW codes through stable L1 index codes, never names."""
+    levels: dict[str, pd.DataFrame] = {}
+    for level, raw, fields in (
+        ("L1", raw_l1, INDEX_CLASSIFY_FIELDS),
+        ("L2", raw_l2, INDEX_CLASSIFY_L2_FIELDS),
+        ("L3", raw_l3, INDEX_CLASSIFY_L3_FIELDS),
+    ):
+        _require_fields(raw, fields, f"index_classify SW2014 {level}")
+        selected = raw.loc[
+            raw["src"].astype("string").eq("SW2014")
+            & raw["level"].astype("string").str.upper().eq(level)
+        ].copy()
+        required = ["index_code", "industry_code"]
+        if level != "L1":
+            required.append("parent_code")
+        values = selected[required].replace("", pd.NA)
+        if values.empty or values.isna().any().any():
+            raise ValueError(f"SW2014 {level} taxonomy is incomplete")
+        if (
+            values["index_code"].astype(str).duplicated().any()
+            or values["industry_code"].astype(str).duplicated().any()
+        ):
+            raise ValueError(f"SW2014 {level} taxonomy is ambiguous")
+        levels[level] = values.astype(str)
+
+    stable_targets = definitions["source_index_code"].astype(str)
+    if stable_targets.duplicated().any():
+        raise ValueError("SW2021 stable L1 index code is ambiguous")
+    target_codes = set(stable_targets)
+    l1_by_industry = dict(
+        zip(
+            levels["L1"]["industry_code"],
+            levels["L1"]["index_code"],
+            strict=True,
+        )
+    )
+    unstable = sorted(set(l1_by_industry.values()) - target_codes)
+    if unstable:
+        raise ValueError(f"historical L1 is absent from SW2021 definitions: {unstable}")
+    l2_to_l1: dict[str, str] = {}
+    for row in levels["L2"].itertuples(index=False):
+        stable_l1 = l1_by_industry.get(str(row.parent_code))
+        if stable_l1 is None:
+            raise ValueError("SW2014 L2 has an unknown L1 parent")
+        l2_to_l1[str(row.industry_code)] = stable_l1
+    l3_to_l1: dict[str, str] = {}
+    for row in levels["L3"].itertuples(index=False):
+        stable_l1 = l2_to_l1.get(str(row.parent_code))
+        if stable_l1 is None:
+            raise ValueError("SW2014 L3 has an unknown L2 parent")
+        l3_to_l1[str(row.index_code)] = stable_l1
+    return HistoricalTaxonomyBridge(l2_to_l1, l3_to_l1)
+
+
 def normalize_industry_membership(
     raw: pd.DataFrame,
     allowed_l1_codes: set[str],
@@ -225,6 +295,15 @@ def normalize_industry_membership(
             "known_at": _utc_dates(effective_from),
             "known_at_source": "effective_date_fallback",
             "source": "tushare.index_member_all",
+            "taxonomy_mapping_source": raw.get(
+                "taxonomy_mapping_source",
+                pd.Series("direct_l1_code", index=raw.index),
+            ).astype("string"),
+            "taxonomy_source_version": raw.get(
+                "taxonomy_source_version",
+                pd.Series("SW2021", index=raw.index),
+            ).astype("string"),
+            "taxonomy_target_version": "SW2021",
         }
     )
     invalid = result["effective_to"].notna() & (
@@ -249,6 +328,7 @@ def normalize_industry_membership_backfill(
     expected_ts_code: str,
     row_limit: int = INDUSTRY_MEMBER_ROW_LIMIT,
     allow_empty: bool = False,
+    historical_bridge: HistoricalTaxonomyBridge | None = None,
 ) -> pd.DataFrame:
     _require_fields(raw, INDUSTRY_MEMBER_FIELDS, "index_member_all ts_code backfill")
     _reject_row_limit(raw, row_limit, "index_member_all ts_code backfill")
@@ -264,11 +344,38 @@ def normalize_industry_membership_backfill(
             "index_member_all backfill contains an unexpected or empty security"
         )
     l2_codes = raw["l2_code"].replace("", pd.NA)
-    if l2_codes.isna().any():
+    if l2_codes.isna().any() and historical_bridge is None:
         raise ValueError("index_member_all backfill contains missing L2 code")
-    mapped = l2_codes.astype(str).map(l2_to_l1)
+    mapped = l2_codes.astype("string").map(l2_to_l1).astype("string")
+    mapping_source = pd.Series("sw2021_l2_parent", index=raw.index, dtype="string")
+    source_version = pd.Series("SW2021", index=raw.index, dtype="string")
+    unresolved = mapped.isna()
+    if unresolved.any() and historical_bridge is not None:
+        historical_l2 = (
+            l2_codes.astype("string")
+            .map(historical_bridge.l2_to_stable_l1)
+            .astype("string")
+        )
+        l3_codes = raw["l3_code"].replace("", pd.NA).astype("string")
+        historical_l3 = l3_codes.map(historical_bridge.l3_to_stable_l1).astype("string")
+        conflict = (
+            unresolved
+            & historical_l2.notna()
+            & historical_l3.notna()
+            & historical_l2.ne(historical_l3)
+        )
+        if conflict.any():
+            raise ValueError("historical L2 and L3 taxonomy paths conflict")
+        historical = historical_l3.fillna(historical_l2)
+        mapped.loc[unresolved] = historical.loc[unresolved]
+        both = unresolved & historical_l2.notna() & historical_l3.notna()
+        only_l3 = unresolved & historical_l3.notna() & ~historical_l2.notna()
+        mapping_source.loc[both] = "sw2014_l3_l2_l1_bridge"
+        mapping_source.loc[only_l3] = "sw2014_l3_l2_l1_bridge"
+        mapping_source.loc[unresolved & ~only_l3 & ~both] = "sw2014_l2_l1_bridge"
+        source_version.loc[unresolved] = historical_bridge.source_version
     if mapped.isna().any():
-        missing = sorted(set(l2_codes.astype(str)[mapped.isna()]))
+        missing = sorted(set(l2_codes.astype("string")[mapped.isna()].dropna()))
         raise ValueError(f"index_member_all backfill has unmapped L2 code: {missing}")
     supplied = raw["l1_code"].replace("", pd.NA).astype("string")
     conflicts = supplied.notna() & supplied.ne(mapped.astype("string"))
@@ -276,6 +383,8 @@ def normalize_industry_membership_backfill(
         raise ValueError("index_member_all L1 conflicts with audited L2 parent mapping")
     recovered = raw.copy()
     recovered["l1_code"] = mapped
+    recovered["taxonomy_mapping_source"] = mapping_source
+    recovered["taxonomy_source_version"] = source_version
     return normalize_industry_membership(recovered, allowed_l1_codes)
 
 
@@ -501,6 +610,14 @@ def validate_exposure_tables(
             ),
             "missing_industry_security_count": len(missing_industry_security_ids),
             "missing_industry_security_ids": missing_industry_security_ids,
+            "historical_taxonomy_bridge_count": int(
+                tables.industry_membership.get(
+                    "taxonomy_source_version", pd.Series(dtype="string")
+                )
+                .astype("string")
+                .eq("SW2014")
+                .sum()
+            ),
         },
         "checks": checks,
     }
@@ -666,6 +783,7 @@ def acquire_exposure_tables(
         for security_id in expected_security_ids - set(membership["security_id"])
     )
     hierarchy_result: TushareQueryResult | None = None
+    historical_taxonomy_results: list[TushareQueryResult] = []
     backfill_results: list[TushareQueryResult] = []
     if missing_ts_codes:
         hierarchy_result = provider.query(
@@ -688,6 +806,39 @@ def acquire_exposure_tables(
                     missing_ts_codes,
                 )
             )
+        requires_historical_bridge = any(
+            not item.frame.empty
+            and (
+                item.frame["l2_code"].replace("", pd.NA).isna().any()
+                or not item.frame["l2_code"]
+                .replace("", pd.NA)
+                .dropna()
+                .astype(str)
+                .isin(l2_to_l1)
+                .all()
+            )
+            for item in backfill_results
+        )
+        historical_bridge: HistoricalTaxonomyBridge | None = None
+        if requires_historical_bridge:
+            for level, fields in (
+                ("L1", INDEX_CLASSIFY_FIELDS),
+                ("L2", INDEX_CLASSIFY_L2_FIELDS),
+                ("L3", INDEX_CLASSIFY_L3_FIELDS),
+            ):
+                historical_taxonomy_results.append(
+                    provider.query(
+                        config.exposure_source.endpoints.industry_classification,
+                        {"level": level, "src": "SW2014"},
+                        fields,
+                    )
+                )
+            historical_bridge = normalize_historical_taxonomy_bridge(
+                historical_taxonomy_results[0].frame,
+                historical_taxonomy_results[1].frame,
+                historical_taxonomy_results[2].frame,
+                definitions,
+            )
         backfill = pd.concat(
             [
                 normalize_industry_membership_backfill(
@@ -696,6 +847,7 @@ def acquire_exposure_tables(
                     set(industry_codes),
                     expected_ts_code=code,
                     allow_empty=True,
+                    historical_bridge=historical_bridge,
                 )
                 for code, item in zip(missing_ts_codes, backfill_results, strict=True)
             ],
@@ -739,6 +891,7 @@ def acquire_exposure_tables(
         *market_results,
         *member_results,
         *([hierarchy_result] if hierarchy_result is not None else []),
+        *historical_taxonomy_results,
         *backfill_results,
     ]
     artifacts = _unique_artifacts(artifact_results)

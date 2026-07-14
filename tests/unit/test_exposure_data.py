@@ -16,10 +16,12 @@ from alpha_lab.robustness.exposure_data import (
     DAILY_BASIC_FIELDS,
     INDEX_CLASSIFY_FIELDS,
     INDEX_CLASSIFY_L2_FIELDS,
+    INDEX_CLASSIFY_L3_FIELDS,
     INDUSTRY_MEMBER_FIELDS,
     _load_phase5_tables,
     acquire_exposure_tables,
     industry_as_of,
+    normalize_historical_taxonomy_bridge,
     normalize_industry_definition,
     normalize_industry_l2_mapping,
     normalize_industry_membership,
@@ -216,6 +218,96 @@ def test_l2_mapping_fails_closed_for_missing_or_ambiguous_parent() -> None:
         normalize_industry_l2_mapping(
             pd.concat([missing.assign(parent_code="110000")] * 2), definitions
         )
+
+
+def test_historical_taxonomy_bridge_recovers_real_code_chain_without_names() -> None:
+    definitions = normalize_industry_definition(_definition_raw())
+    l1 = pd.DataFrame(
+        [["801010.SI", "wrong name", "L1", "230000", "SW2014"]],
+        columns=INDEX_CLASSIFY_FIELDS,
+    )
+    l2 = pd.DataFrame(
+        [["801041.SI", "wrong name", "L2", "230100", "230000", "SW2014"]],
+        columns=INDEX_CLASSIFY_L2_FIELDS,
+    )
+    l3 = pd.DataFrame(
+        [["850412.SI", "wrong name", "L3", "230102", "230100", "SW2014"]],
+        columns=INDEX_CLASSIFY_L3_FIELDS,
+    )
+    bridge = normalize_historical_taxonomy_bridge(l1, l2, l3, definitions)
+    raw = _membership_raw().assign(l1_code="", l2_code="230100", l3_code="850412.SI")
+
+    recovered = normalize_industry_membership_backfill(
+        raw,
+        {},
+        {"801010.SI"},
+        expected_ts_code="600000.SH",
+        historical_bridge=bridge,
+    )
+
+    assert recovered["industry_id"].tolist() == ["CN:SW2021:801010.SI"]
+    assert recovered["taxonomy_mapping_source"].tolist() == ["sw2014_l3_l2_l1_bridge"]
+    assert recovered["taxonomy_source_version"].tolist() == ["SW2014"]
+    assert recovered["taxonomy_target_version"].tolist() == ["SW2021"]
+
+
+def test_historical_taxonomy_bridge_rejects_conflicting_paths() -> None:
+    definitions = pd.concat(
+        [
+            normalize_industry_definition(_definition_raw()),
+            normalize_industry_definition(
+                _definition_raw().assign(index_code="801020.SI", industry_code="240000")
+            ),
+        ],
+        ignore_index=True,
+    )
+    l1 = pd.DataFrame(
+        [
+            ["801010.SI", "x", "L1", "230000", "SW2014"],
+            ["801020.SI", "y", "L1", "240000", "SW2014"],
+        ],
+        columns=INDEX_CLASSIFY_FIELDS,
+    )
+    l2 = pd.DataFrame(
+        [
+            ["801041.SI", "x", "L2", "230100", "230000", "SW2014"],
+            ["801051.SI", "y", "L2", "240100", "240000", "SW2014"],
+        ],
+        columns=INDEX_CLASSIFY_L2_FIELDS,
+    )
+    l3 = pd.DataFrame(
+        [["850412.SI", "y", "L3", "240102", "240100", "SW2014"]],
+        columns=INDEX_CLASSIFY_L3_FIELDS,
+    )
+    bridge = normalize_historical_taxonomy_bridge(l1, l2, l3, definitions)
+
+    with pytest.raises(ValueError, match="paths conflict"):
+        normalize_industry_membership_backfill(
+            _membership_raw().assign(l1_code="", l2_code="230100", l3_code="850412.SI"),
+            {},
+            {"801010.SI", "801020.SI"},
+            expected_ts_code="600000.SH",
+            historical_bridge=bridge,
+        )
+
+
+def test_historical_taxonomy_bridge_rejects_l1_absent_from_sw2021() -> None:
+    definitions = normalize_industry_definition(_definition_raw())
+    l1 = pd.DataFrame(
+        [["801999.SI", "x", "L1", "230000", "SW2014"]],
+        columns=INDEX_CLASSIFY_FIELDS,
+    )
+    l2 = pd.DataFrame(
+        [["801041.SI", "x", "L2", "230100", "230000", "SW2014"]],
+        columns=INDEX_CLASSIFY_L2_FIELDS,
+    )
+    l3 = pd.DataFrame(
+        [["850412.SI", "x", "L3", "230102", "230100", "SW2014"]],
+        columns=INDEX_CLASSIFY_L3_FIELDS,
+    )
+
+    with pytest.raises(ValueError, match="absent from SW2021"):
+        normalize_historical_taxonomy_bridge(l1, l2, l3, definitions)
 
 
 def test_membership_backfill_fails_closed_for_empty_security_response() -> None:
@@ -716,6 +808,34 @@ def test_acquisition_backfills_empty_l1_by_ts_code_via_audited_l2_parent(
     }
 
 
+def test_acquisition_bridges_historical_taxonomy_and_counts_provenance(
+    tmp_path: Path,
+) -> None:
+    _phase5_provider_fixture(tmp_path, security_ids=["CN:SSE:600000", "CN:SSE:600001"])
+    config, _ = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    provider = _AcquisitionFakeProvider(
+        tmp_path, empty_industry="801020.SI", historical_backfill=True
+    )
+
+    tables, artifacts = acquire_exposure_tables(tmp_path, config, provider)
+    recovered = tables.industry_membership.loc[
+        tables.industry_membership["security_id"].eq("CN:SSE:600001")
+    ]
+
+    assert recovered["industry_id"].tolist() == ["CN:SW2021:801010.SI"]
+    assert recovered["taxonomy_mapping_source"].tolist() == ["sw2014_l3_l2_l1_bridge"]
+    assert len(artifacts) == 11
+    quality = validate_exposure_tables(
+        tables,
+        {"CN:SSE:600000", "CN:SSE:600001"},
+        expected_market_observations=tables.market_cap.attrs[
+            "expected_market_observations"
+        ],
+        minimum_industry_observation_coverage=0.98,
+    )
+    assert quality["summary"]["historical_taxonomy_bridge_count"] == 1
+
+
 def _definition_raw() -> pd.DataFrame:
     return pd.DataFrame(
         [["801010.SI", "农林牧渔", "L1", "110000", "SW2021"]],
@@ -852,6 +972,7 @@ class _AcquisitionFakeProvider:
         empty_security: str | None = None,
         empty_industry: str | None = None,
         sparse_bulk: bool = False,
+        historical_backfill: bool = False,
     ) -> None:
         self.root = root
         self.calls: list[tuple[str, dict[str, object], tuple[str, ...]]] = []
@@ -862,6 +983,7 @@ class _AcquisitionFakeProvider:
         self.empty_security = empty_security
         self.empty_industry = empty_industry
         self.sparse_bulk = sparse_bulk
+        self.historical_backfill = historical_backfill
 
     def query(
         self, api_name: str, params: dict[str, object], fields: tuple[str, ...]
@@ -904,6 +1026,22 @@ class _AcquisitionFakeProvider:
 
     def _frame(self, api_name: str, params: dict[str, object]) -> pd.DataFrame:
         if api_name == "index_classify":
+            if params.get("src") == "SW2014":
+                level = str(params["level"])
+                if level == "L1":
+                    return pd.DataFrame(
+                        [["801010.SI", "legacy", "L1", "230000", "SW2014"]],
+                        columns=INDEX_CLASSIFY_FIELDS,
+                    )
+                if level == "L2":
+                    return pd.DataFrame(
+                        [["801041.SI", "legacy", "L2", "230100", "230000", "SW2014"]],
+                        columns=INDEX_CLASSIFY_L2_FIELDS,
+                    )
+                return pd.DataFrame(
+                    [["850412.SI", "legacy", "L3", "230102", "230100", "SW2014"]],
+                    columns=INDEX_CLASSIFY_L3_FIELDS,
+                )
             if params.get("level") == "L2":
                 return pd.DataFrame(
                     [
@@ -935,6 +1073,16 @@ class _AcquisitionFakeProvider:
                     out_date="",
                 )
             ts_code = str(params["ts_code"])
+            if self.historical_backfill:
+                return _membership_raw().assign(
+                    l1_code="",
+                    l1_name="",
+                    l2_code="230100",
+                    l3_code="850412.SI",
+                    ts_code=ts_code,
+                    in_date="20200101",
+                    out_date="",
+                )
             return _membership_raw().assign(
                 l1_code="",
                 l1_name="",

@@ -225,6 +225,7 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
             "industry_observation_coverage_ratio",
             "minimum_industry_observation_coverage",
             "missing_industry_security_ids",
+            "historical_taxonomy_bridge_count",
         }
         or any(
             summary.get(key) != value for key, value in expected_summary_counts.items()
@@ -266,6 +267,9 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
         )
         or summary.get("missing_industry_security_count")
         != len(summary.get("missing_industry_security_ids", []))
+        or not _nonnegative_int(summary.get("historical_taxonomy_bridge_count"))
+        or summary.get("historical_taxonomy_bridge_count", 0)
+        > expected_summary_counts["industry_membership_count"]
         or abs(
             float(summary.get("industry_observation_coverage_ratio", -1))
             - (

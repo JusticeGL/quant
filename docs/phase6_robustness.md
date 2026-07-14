@@ -84,6 +84,16 @@ industry-neutral calculation. Empty L1 responses are disclosed separately as
 information; duplicate, overlap, unknown-reference, and market-cap checks are
 not relaxed.
 
+Some historical memberships use codes that predate SW2021. When a non-empty
+row cannot be resolved by the SW2021 L2 hierarchy, bootstrap obtains SW2014
+L1/L2/L3 dictionaries from the same immutable Tushare cache and follows only
+their code hierarchy. An L3 and L2 path must agree, and the resulting SW2014 L1
+index code must uniquely exist in the SW2021 L1 dictionary. No industry-name
+matching or hand-written security/code exception is allowed. The Parquet row
+records source/target taxonomy and mapping provenance; quality reports include
+the bridge count. Any missing, ambiguous, unstable or conflicting link still
+stops publication.
+
 ## Evidence and warning semantics
 
 Robustness evaluation computes the candidate once and uses the fixed five folds.
