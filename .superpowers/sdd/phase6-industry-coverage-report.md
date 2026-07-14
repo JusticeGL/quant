@@ -37,6 +37,17 @@ not authorize the locked final test.
   duckdb 1.5.4, pyarrow 24.0.0, lightgbm 4.6.0 imported successfully.
 - `git diff --check`: passed.
 
-The real cached exposure bootstrap and idempotent second run are performed
-after this implementation commit; their snapshot identity and actual counts
-will be appended only if publication succeeds.
+## Real cached bootstrap
+
+After commit `6510c47`, the required bootstrap was run with
+`/private/tmp/quant-phase6-data.yaml` and `../../.env`. It stopped before
+publication, so no `p6x-*` snapshot or manifest hash was produced and an
+idempotent second publication run was not applicable.
+
+The fail-closed cause was not the approved 98% threshold: one non-empty
+per-security backfill (`000708.SZ`) contains L2 industry code `230100`, while
+the cached SW2021 L2 hierarchy has no audited parent mapping for that code.
+The implementation intentionally did not infer an L1, discard the row, relax
+hierarchy validation, delete raw cache, or continue to freeze. The raw cache is
+preserved. Resolving this requires an explicit data-source/historical taxonomy
+decision before bootstrap can be retried.
