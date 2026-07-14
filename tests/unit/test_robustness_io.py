@@ -645,6 +645,7 @@ def _write_catalog_anchor(data_dir: Path, manifest: dict[str, Any]) -> None:
         f"report|{relative_path}|{reference['sha256']}".encode()
     ).hexdigest()
     database_path = data_dir / "metadata.duckdb"
+    checked_artifacts = len(manifest["raw_inputs"]) + len(manifest["artifacts"]) + 1
     catalog.initialize_database(database_path)
     with duckdb.connect(str(database_path)) as connection:
         connection.execute(
@@ -684,7 +685,7 @@ def _write_catalog_anchor(data_dir: Path, manifest: dict[str, Any]) -> None:
                 (snapshot_id, dataset_name, check_name, severity, status,
                  observed_value, threshold_value, affected_rows)
             VALUES (?, 'research.exposure_snapshot', 'manifest_and_artifacts',
-                    'error', 'pass', 1, 1, 0)
+                    'error', 'pass', ?, ?, 0)
             """,
-            [manifest["snapshot_id"]],
+            [manifest["snapshot_id"], checked_artifacts, checked_artifacts],
         )

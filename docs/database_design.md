@@ -118,12 +118,23 @@ TOCTOU seal. It is metadata only and does not duplicate market facts.
 
 This registration is also the independent pre-test authorization anchor.
 Freeze and pre-test readers open `data/metadata.duckdb` read-only and require
-schema version 3+, one exact `meta.dataset_snapshot` row (`valid`, passing
+the exact packaged migration ledger through schema version 3, one exact
+`meta.dataset_snapshot` row (`valid`, passing
 quality, exact identity and Phase 5 parent), one uniquely linked
 `meta.pretest_data_capability` JSON artifact with exact path/SHA, and the
 passing `research.exposure_snapshot / manifest_and_artifacts` quality row.
 Anchor failure occurs before safe Parquet access. After attestation, Parquet
 footer row counts and the closed 2020-2025 safe partition namespace are checked.
+The schema check compares the complete ordered migration ledger (versions 1-3,
+names, and packaged SQL SHA256 values); a missing, additional, renamed, or
+re-hashed migration fails closed.
+
+This is a cooperative immutable-publisher trust model. A process with permission
+to rewrite or replace `metadata.duckdb` can manufacture a matching catalog and
+is outside the guarantee, so manual database tampering is not a supported or
+protected workflow. Resistance to a same-privilege malicious database writer
+would require a trust root outside this data directory, such as externally
+managed signatures or independently enforced read-only storage.
 
 Small Phase 5 reference artifacts, their quality report and Phase 6 industry
 artifacts are hashed and parsed from the same in-memory byte buffer, so derived

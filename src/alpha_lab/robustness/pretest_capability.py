@@ -9,6 +9,8 @@ from typing import Any, cast
 import duckdb
 import pyarrow.parquet as pq
 
+from alpha_lab.database import catalog
+
 PRETEST_CAPABILITY_SCHEMA_VERSION = 1
 PRETEST_CUTOFF = "2026-01-01"
 _PHASE5_DATASETS = ("daily_bar", "adjustment_factor", "daily_status")
@@ -162,8 +164,12 @@ def _validate_catalog_anchor(
     ).as_posix()
     try:
         with duckdb.connect(str(database_path), read_only=True) as connection:
-            versions = connection.execute(
-                "SELECT version FROM meta.schema_migration ORDER BY version"
+            migration_rows = connection.execute(
+                """
+                SELECT version, name, sha256
+                FROM meta.schema_migration
+                ORDER BY version
+                """
             ).fetchall()
             snapshot_rows = connection.execute(
                 """
@@ -201,8 +207,12 @@ def _validate_catalog_anchor(
             ).fetchall()
     except (duckdb.Error, OSError) as error:
         raise ValueError("pre-test capability catalog anchor is invalid") from error
-    if not versions or max(int(row[0]) for row in versions) < 3:
-        raise ValueError("pre-test capability catalog schema is older than version 3")
+    actual_migrations = tuple(
+        (int(version), str(name), str(sha256))
+        for version, name, sha256 in migration_rows
+    )
+    if actual_migrations != catalog.migration_records():
+        raise ValueError("pre-test capability catalog migration identity mismatch")
     expected_snapshot = (
         "point_in_time_exposure",
         "valid",
@@ -224,15 +234,19 @@ def _validate_catalog_anchor(
         raise ValueError("pre-test capability catalog artifact anchor mismatch")
     if len(quality_rows) != 1:
         raise ValueError("pre-test capability catalog quality anchor is missing")
-    severity, status, observed, threshold, affected = quality_rows[0]
-    if (
-        severity != "error"
-        or status != "pass"
-        or affected != 0
-        or observed is None
-        or threshold is None
-        or float(observed) != float(threshold)
-    ):
+    checked_artifacts = (
+        len(manifest.get("raw_inputs", []))
+        + len(manifest.get("artifacts", []))
+        + 1
+    )
+    expected_quality = (
+        "error",
+        "pass",
+        float(checked_artifacts),
+        float(checked_artifacts),
+        0,
+    )
+    if tuple(quality_rows[0]) != expected_quality:
         raise ValueError("pre-test capability catalog quality anchor mismatch")
 
 

@@ -309,6 +309,18 @@ def _migration_sql(filename: str) -> str:
     return resource.read_text(encoding="utf-8")
 
 
+def migration_records() -> tuple[tuple[int, str, str], ...]:
+    """Return the exact packaged migration identities accepted by the catalog."""
+    return tuple(
+        (
+            version,
+            name,
+            hashlib.sha256(_migration_sql(filename).encode("utf-8")).hexdigest(),
+        )
+        for version, name, filename in MIGRATIONS
+    )
+
+
 def initialize_database(database_path: Path) -> InitializationResult:
     database_path.parent.mkdir(parents=True, exist_ok=True)
     latest_sha256 = ""

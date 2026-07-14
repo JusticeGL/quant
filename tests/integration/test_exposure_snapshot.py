@@ -6,8 +6,10 @@ import shutil
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 
+from alpha_lab.database import catalog
 from alpha_lab.research_data.provider import TushareArtifact
 from alpha_lab.robustness import exposure_snapshot
 from alpha_lab.robustness.config import load_robustness_config
@@ -23,6 +25,7 @@ from alpha_lab.robustness.exposure_snapshot import (
     materialize_exposure_snapshot,
     validate_exposure_snapshot,
 )
+from alpha_lab.robustness.pretest_capability import validate_pretest_capability
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -109,6 +112,14 @@ def test_exposure_snapshot_is_deterministic_and_validated_before_pointer(
     ).read_text().strip() == first.snapshot_id
     validation = validate_exposure_snapshot(tmp_path, first.snapshot_id)
     assert validation["healthy"] is True
+    catalog.sync_exposure_snapshot(
+        tmp_path / "metadata.duckdb", tmp_path, first.manifest_path
+    )
+    anchored_root, anchored_capability = validate_pretest_capability(
+        tmp_path, first.snapshot_id
+    )
+    assert anchored_root["snapshot_id"] == first.snapshot_id
+    assert anchored_capability["quality"]["status"] == "pass"
     manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
     assert first.manifest_path == (
         tmp_path / "manifests" / first.snapshot_id / "manifest.json"
@@ -685,6 +696,7 @@ def _phase5_fixture(tmp_path: Path) -> Path:
     research = tmp_path / "research" / "p5-ecaa6e8aeae6b9f8fb25"
     research.mkdir(parents=True)
     security = research / "security_master.parquet"
+    names = research / "security_name_history.parquet"
     membership = research / "index_membership.parquet"
     universe = research / "universe_dates.parquet"
     daily = research / "daily_bar" / "year=2021" / "part.parquet"
@@ -695,8 +707,50 @@ def _phase5_fixture(tmp_path: Path) -> Path:
     daily_2026.parent.mkdir(parents=True)
     adjustment.parent.mkdir(parents=True)
     status.parent.mkdir(parents=True)
-    pd.DataFrame([{"security_id": "CN:SSE:600000"}]).to_parquet(security, index=False)
-    pd.DataFrame([{"security_id": "CN:SSE:600000"}]).to_parquet(membership, index=False)
+    pd.DataFrame(
+        [
+            {
+                "security_id": "CN:SSE:600000",
+                "ts_code": "600000.SH",
+                "symbol": "600000",
+                "name": "浦发银行",
+                "exchange": "SSE",
+                "board": "主板",
+                "currency": "CNY",
+                "list_status": "L",
+                "list_date": pd.Timestamp("1999-11-10"),
+                "delist_date": pd.NaT,
+                "known_at": pd.Timestamp("2020-01-01", tz="UTC"),
+            }
+        ]
+    ).to_parquet(security, index=False)
+    pd.DataFrame(
+        [
+            {
+                "security_id": "CN:SSE:600000",
+                "name": "浦发银行",
+                "is_st": False,
+                "effective_from": pd.Timestamp("1999-11-10"),
+                "effective_to": pd.NaT,
+                "announced_at": pd.Timestamp("1999-11-10", tz="UTC"),
+                "known_at": pd.Timestamp("1999-11-10", tz="UTC"),
+            }
+        ]
+    ).to_parquet(names, index=False)
+    pd.DataFrame(
+        [
+            {
+                "index_id": "CN:INDEX:000300.SH",
+                "security_id": "CN:SSE:600000",
+                "effective_from": pd.Timestamp("2020-01-01"),
+                "effective_to": pd.NaT,
+                "announced_at": pd.Timestamp("2019-12-31", tz="UTC"),
+                "known_at": pd.Timestamp("2019-12-31", tz="UTC"),
+                "weight": 0.5,
+                "membership_method": "fixture",
+            }
+        ]
+    ).to_parquet(membership, index=False)
     pd.DataFrame(
         [
             {
@@ -730,7 +784,7 @@ def _phase5_fixture(tmp_path: Path) -> Path:
                 }
             ]
         ).to_parquet(path, index=False)
-    phase5_artifacts = [security, membership, universe, daily, daily_2026]
+    phase5_artifacts = [security, names, membership, universe, daily, daily_2026]
     empty_dated = pd.DataFrame(
         {
             "trade_date": pd.Series(dtype="datetime64[ns]"),
@@ -748,14 +802,26 @@ def _phase5_fixture(tmp_path: Path) -> Path:
     manifest_dir = tmp_path / "manifests" / "p5-ecaa6e8aeae6b9f8fb25"
     manifest_dir.mkdir(parents=True)
     manifest = {
+        "schema_version": 1,
         "snapshot_id": "p5-ecaa6e8aeae6b9f8fb25",
         "snapshot_type": "research_market",
+        "identity_sha256": "9" * 64,
+        "quality_status": "pass",
+        "source": {"provider": "tushare", "credential_redacted": True},
+        "scope": {
+            "index_code": "000300.SH",
+            "start_date": "2020-01-01",
+            "end_date": "2026-07-11",
+        },
+        "summary": {"security_count": 1, "daily_bar_count": 2},
+        "raw_inputs": [],
         "artifacts": [
             {
                 "name": artifact.relative_to(research).as_posix(),
                 "path": artifact.relative_to(tmp_path).as_posix(),
+                "format": "parquet",
                 "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
-                "row_count": 1,
+                "row_count": pq.ParquetFile(artifact).metadata.num_rows,
             }
             for artifact in dict.fromkeys(phase5_artifacts)
         ],

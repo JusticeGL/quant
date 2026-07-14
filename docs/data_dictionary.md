@@ -97,6 +97,9 @@ SHA256。
 精确的有效 p6x 快照身份/父快照、唯一 capability artifact 路径与 SHA，以及
 通过的管理质量记录。之后才允许读取安全 Parquet footer，并核对实际行数及
 2020-2025 封闭分区集合；缺失或不一致时在打开 Parquet 前失败。
+数据库迁移账本必须与内置 1-3 号迁移的版本、名称和 SQL SHA256 完全一致，
+也不允许额外记录。这里采用协作式不可变发布者模型：同权限写入者手工篡改或
+替换 DuckDB 不在保证范围；若要抵抗该攻击者，需要外部签名或独立强制只读存储。
 
 Catalog 同步在 Task 2 验证后记录 manifest SHA256，并在 DuckDB 写锁与
 事务内重读 manifest、比较 SHA256，然后对 market-cap、raw、quality、

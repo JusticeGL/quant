@@ -113,13 +113,24 @@ def test_freeze_pins_candidate_snapshots_policies_boundary_and_git(
 ) -> None:
     readers: list[str] = []
 
+    real_connect = duckdb.connect
+    catalog_reads: list[tuple[str, bool]] = []
+
     def forbidden(*args: object, **kwargs: object) -> object:
         readers.append("opened")
-        raise AssertionError("freeze must not read Parquet or DuckDB")
+        raise AssertionError("freeze must not use a dataframe Parquet reader")
+
+    def audited_catalog_connect(
+        database: str, *, read_only: bool = False, **kwargs: object
+    ) -> duckdb.DuckDBPyConnection:
+        catalog_reads.append((database, read_only))
+        assert Path(database) == freeze_fixture["data"] / "metadata.duckdb"
+        assert read_only is True
+        return real_connect(database, read_only=read_only, **kwargs)
 
     monkeypatch.setattr(pd, "read_parquet", forbidden)
     monkeypatch.setattr(pq, "read_table", forbidden)
-    monkeypatch.setattr(duckdb, "connect", forbidden)
+    monkeypatch.setattr(duckdb, "connect", audited_catalog_connect)
 
     result = freeze_candidate(
         "F1002",
@@ -167,6 +178,9 @@ def test_freeze_pins_candidate_snapshots_policies_boundary_and_git(
     }
     assert document["git_commit"] == _git(freeze_fixture["repo"], "rev-parse", "HEAD")
     assert readers == []
+    assert catalog_reads == [
+        (str(freeze_fixture["data"] / "metadata.duckdb"), True)
+    ]
 
 
 def test_freeze_is_byte_identical_on_repeat(freeze_fixture: dict[str, Path]) -> None:
@@ -334,15 +348,28 @@ def test_coherently_resigned_false_quality_requires_admin_catalog_anchor(
     "corruption",
     [
         "missing_database",
-        "old_schema",
+        "migration_missing",
+        "migration_extra",
+        "migration_name",
+        "migration_sha",
         "snapshot_type",
         "snapshot_status",
         "snapshot_identity",
         "snapshot_parent",
         "artifact_path",
         "artifact_sha",
+        "artifact_format",
+        "artifact_mutable",
+        "artifact_dataset_name",
+        "link_dataset_name",
+        "artifact_nonunique",
         "quality_status",
-        "quality_result",
+        "quality_result_status",
+        "quality_result_severity",
+        "quality_result_observed",
+        "quality_result_threshold",
+        "quality_result_affected_rows",
+        "quality_result_missing",
     ],
 )
 def test_catalog_anchor_corruption_fails_before_safe_parquet(
@@ -355,18 +382,99 @@ def test_catalog_anchor_corruption_fails_before_safe_parquet(
         database.unlink()
     else:
         statements = {
-            "old_schema": "DELETE FROM meta.schema_migration WHERE version = 3",
+            "migration_missing": "DELETE FROM meta.schema_migration WHERE version = 2",
+            "migration_extra": (
+                "INSERT INTO meta.schema_migration (version, name, sha256) "
+                "VALUES (4, 'forged', repeat('0', 64))"
+            ),
+            "migration_name": "UPDATE meta.schema_migration SET name = 'forged' WHERE version = 2",
+            "migration_sha": (
+                "UPDATE meta.schema_migration SET sha256 = repeat('0', 64) "
+                "WHERE version = 2"
+            ),
             "snapshot_type": "UPDATE meta.dataset_snapshot SET snapshot_type = 'forged'",
             "snapshot_status": "UPDATE meta.dataset_snapshot SET status = 'invalid'",
-            "snapshot_identity": "UPDATE meta.dataset_snapshot SET identity_sha256 = repeat('0', 64)",
+            "snapshot_identity": (
+                "UPDATE meta.dataset_snapshot "
+                "SET identity_sha256 = repeat('0', 64)"
+            ),
             "snapshot_parent": "UPDATE meta.dataset_snapshot SET parent_snapshot_id = 'p5-forged'",
-            "artifact_path": "UPDATE meta.artifact SET relative_path = 'forged.json' WHERE dataset_name = 'meta.pretest_data_capability'",
-            "artifact_sha": "UPDATE meta.artifact SET sha256 = repeat('0', 64) WHERE dataset_name = 'meta.pretest_data_capability'",
+            "artifact_path": (
+                "UPDATE meta.artifact SET relative_path = 'forged.json' "
+                "WHERE dataset_name = 'meta.pretest_data_capability'"
+            ),
+            "artifact_sha": (
+                "UPDATE meta.artifact SET sha256 = repeat('0', 64) "
+                "WHERE dataset_name = 'meta.pretest_data_capability'"
+            ),
+            "artifact_format": (
+                "UPDATE meta.artifact SET format = 'parquet' "
+                "WHERE dataset_name = 'meta.pretest_data_capability'"
+            ),
+            "artifact_mutable": (
+                "UPDATE meta.artifact SET immutable = false "
+                "WHERE dataset_name = 'meta.pretest_data_capability'"
+            ),
+            "artifact_dataset_name": (
+                "UPDATE meta.artifact SET dataset_name = 'meta.forged' "
+                "WHERE dataset_name = 'meta.pretest_data_capability'"
+            ),
+            "link_dataset_name": (
+                "UPDATE meta.snapshot_artifact SET dataset_name = 'meta.forged' "
+                "WHERE dataset_name = 'meta.pretest_data_capability'"
+            ),
             "quality_status": "UPDATE meta.dataset_snapshot SET quality_status = 'warning'",
-            "quality_result": "UPDATE meta.quality_result SET status = 'fail' WHERE dataset_name = 'research.exposure_snapshot'",
+            "quality_result_status": (
+                "UPDATE meta.quality_result SET status = 'fail' "
+                "WHERE dataset_name = 'research.exposure_snapshot'"
+            ),
+            "quality_result_severity": (
+                "UPDATE meta.quality_result SET severity = 'warning' "
+                "WHERE dataset_name = 'research.exposure_snapshot'"
+            ),
+            "quality_result_observed": (
+                "UPDATE meta.quality_result SET observed_value = observed_value + 1 "
+                "WHERE dataset_name = 'research.exposure_snapshot'"
+            ),
+            "quality_result_threshold": (
+                "UPDATE meta.quality_result "
+                "SET threshold_value = threshold_value + 1 "
+                "WHERE dataset_name = 'research.exposure_snapshot'"
+            ),
+            "quality_result_affected_rows": (
+                "UPDATE meta.quality_result SET affected_rows = 1 "
+                "WHERE dataset_name = 'research.exposure_snapshot'"
+            ),
+            "quality_result_missing": (
+                "DELETE FROM meta.quality_result "
+                "WHERE dataset_name = 'research.exposure_snapshot'"
+            ),
         }
         with duckdb.connect(str(database)) as connection:
-            connection.execute(statements[corruption])
+            if corruption == "artifact_nonunique":
+                connection.execute(
+                    """
+                    INSERT INTO meta.artifact
+                        (artifact_id, layer, dataset_name, relative_path, format,
+                         sha256, schema_version, immutable)
+                    SELECT repeat('f', 64), layer, dataset_name, relative_path,
+                           format, sha256, schema_version, immutable
+                    FROM meta.artifact
+                    WHERE dataset_name = 'meta.pretest_data_capability'
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO meta.snapshot_artifact
+                        (snapshot_id, artifact_id, dataset_name)
+                    SELECT snapshot_id, repeat('f', 64),
+                           'meta.pretest_data_capability'
+                    FROM meta.dataset_snapshot
+                    WHERE snapshot_type = 'point_in_time_exposure'
+                    """
+                )
+            else:
+                connection.execute(statements[corruption])
     real_open = Path.open
 
     def forbid_parquet(path: Path, *args: object, **kwargs: object) -> object:
@@ -401,6 +509,18 @@ def test_anchored_capability_rejects_actual_parquet_row_count_mismatch(
             freeze_fixture["config"],
             freeze_fixture["data"],
             freeze_fixture["experiments"],
+        )
+
+
+def test_official_catalog_sync_rejects_coherently_resigned_capability(
+    freeze_fixture: dict[str, Path],
+) -> None:
+    manifest_path = _coherently_resign_false_quality(freeze_fixture)
+    with pytest.raises(ValueError, match="invalid exposure snapshot"):
+        catalog.sync_exposure_snapshot(
+            freeze_fixture["data"] / "metadata.duckdb",
+            freeze_fixture["data"],
+            manifest_path,
         )
 
 
@@ -1243,6 +1363,7 @@ def _write_catalog_anchor(data_dir: Path, manifest_path: Path) -> None:
         f"report|{relative_path}|{reference['sha256']}".encode()
     ).hexdigest()
     database_path = data_dir / "metadata.duckdb"
+    checked_artifacts = len(manifest["raw_inputs"]) + len(manifest["artifacts"]) + 1
     catalog.initialize_database(database_path)
     with duckdb.connect(str(database_path)) as connection:
         connection.execute(
@@ -1282,9 +1403,9 @@ def _write_catalog_anchor(data_dir: Path, manifest_path: Path) -> None:
                 (snapshot_id, dataset_name, check_name, severity, status,
                  observed_value, threshold_value, affected_rows)
             VALUES (?, 'research.exposure_snapshot', 'manifest_and_artifacts',
-                    'error', 'pass', 1, 1, 0)
+                    'error', 'pass', ?, ?, 0)
             """,
-            [manifest["snapshot_id"]],
+            [manifest["snapshot_id"], checked_artifacts, checked_artifacts],
         )
 
 

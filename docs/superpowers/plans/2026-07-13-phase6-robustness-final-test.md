@@ -267,6 +267,11 @@ read-only mode and require the exact Task 3 catalog attestation for the p6x root
 and unique capability artifact plus passing administrative quality. They then
 validate the closed 2020-2025 safe partition set and Parquet footer row counts.
 Missing/old/mismatched catalog state fails closed before Parquet access.
+The migration ledger is matched exactly by version, name, and packaged SQL
+SHA256, including rejection of extras. This is a cooperative publisher check,
+not protection from manual database mutation or replacement by an actor with
+the same write authority; that stronger threat model needs an external trust
+root or enforced read-only storage.
 
 - [ ] **Step 1: Write failing locked-read tests**
 

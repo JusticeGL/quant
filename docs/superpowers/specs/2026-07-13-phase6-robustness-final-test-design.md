@@ -57,7 +57,8 @@ are located by the root p6x ID; there is no Phase 5-manifest fallback.
 
 The pure pre-test validator additionally requires the Task 3 administrative
 catalog at `data/metadata.duckdb` as an independent trust anchor. It opens the
-database read-only, requires schema version 3 or newer, and matches the exact
+database read-only, requires the exact packaged migration ledger through schema
+version 3, and matches the exact
 valid p6x snapshot type, root identity, Phase 5 parent, passing administrative
 quality result, and the unique linked `meta.pretest_data_capability` artifact
 path/SHA. Missing or mismatched catalog state fails before any safe Parquet is
@@ -67,6 +68,15 @@ closed: each of daily-bar, adjustment-factor, daily-status and market-cap has
 exactly one partition for every year 2020-2025, plus the two fixed industry
 artifacts. No Phase 5 root/full quality, p6x full quality/raw/full membership,
 or 2026 partition is opened.
+
+Here, the schema requirement means an exact comparison of the ordered 1-3
+migration records, including migration names and SHA256 of the packaged SQL;
+extra records also fail. The anchor assumes the cooperative immutable publisher
+and operating permissions protect the DuckDB file. Manual DuckDB mutation,
+database replacement, or a malicious writer with the same filesystem authority
+is outside the threat model. Protecting against that actor requires an external
+signature authority or independently enforced read-only storage; the local
+catalog check must not be interpreted as providing that property.
 
 The immutable exposure snapshot ID is `p6x-<identity-prefix>`. Its identity
 includes the Phase 5 manifest hash, every raw exposure artifact hash, the
