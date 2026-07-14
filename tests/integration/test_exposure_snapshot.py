@@ -19,11 +19,62 @@ from alpha_lab.robustness.exposure_data import (
     validate_exposure_tables,
 )
 from alpha_lab.robustness.exposure_snapshot import (
+    derive_pretest_membership,
     materialize_exposure_snapshot,
     validate_exposure_snapshot,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_pretest_membership_is_deterministically_bounded() -> None:
+    full = pd.DataFrame(
+        [
+            {
+                "industry_id": "A",
+                "security_id": "CN:SSE:600000",
+                "effective_from": pd.Timestamp("2025-01-01"),
+                "effective_to": pd.NaT,
+                "known_at": pd.Timestamp("2025-01-01", tz="UTC"),
+                "source": "fixture",
+            },
+            {
+                "industry_id": "B",
+                "security_id": "CN:SSE:600001",
+                "effective_from": pd.Timestamp("2025-06-01"),
+                "effective_to": pd.Timestamp("2026-06-01"),
+                "known_at": pd.Timestamp("2025-06-01", tz="UTC"),
+                "source": "fixture",
+            },
+            {
+                "industry_id": "C",
+                "security_id": "CN:SSE:600002",
+                "effective_from": pd.Timestamp("2026-01-01"),
+                "effective_to": pd.NaT,
+                "known_at": pd.Timestamp("2025-12-01", tz="UTC"),
+                "source": "fixture",
+            },
+            {
+                "industry_id": "D",
+                "security_id": "CN:SSE:600003",
+                "effective_from": pd.Timestamp("2025-01-01"),
+                "effective_to": pd.NaT,
+                "known_at": pd.Timestamp("2026-01-01", tz="UTC"),
+                "source": "fixture",
+            },
+        ]
+    )
+
+    safe = derive_pretest_membership(full)
+
+    assert safe["industry_id"].tolist() == ["A", "B"]
+    assert safe["effective_to"].tolist() == [
+        pd.Timestamp("2025-12-31"),
+        pd.Timestamp("2025-12-31"),
+    ]
+    assert (safe["effective_from"] < pd.Timestamp("2026-01-01")).all()
+    assert (safe["effective_to"] < pd.Timestamp("2026-01-01")).all()
+    assert (safe["known_at"] < pd.Timestamp("2026-01-01", tz="UTC")).all()
 
 
 def test_exposure_snapshot_is_deterministic_and_validated_before_pointer(
@@ -74,6 +125,17 @@ def test_exposure_snapshot_is_deterministic_and_validated_before_pointer(
         item["name"] == "market_cap/year=2026/part.parquet"
         for item in manifest["artifacts"]
     )
+    safe_artifact = next(
+        item
+        for item in manifest["artifacts"]
+        if item["name"] == "industry_membership_pretest.parquet"
+    )
+    safe = pd.read_parquet(tmp_path / safe_artifact["path"])
+    assert safe_artifact["row_count"] == len(safe)
+    assert manifest["artifacts"] != []
+    assert json.loads(first.quality_report_path.read_text())["summary"][
+        "industry_membership_pretest_count"
+    ] == len(safe)
 
 
 def test_exposure_snapshot_refuses_quality_error_without_publishing_pointer(
@@ -445,6 +507,46 @@ def test_validation_rejects_quality_row_count_mismatch(tmp_path: Path) -> None:
 
     assert validation["healthy"] is False
     assert "quality_row_counts" in validation["failures"]
+
+
+def test_validation_rejects_missing_pretest_membership_artifact(
+    tmp_path: Path,
+) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    safe = next(
+        item
+        for item in manifest["artifacts"]
+        if item["name"] == "industry_membership_pretest.parquet"
+    )
+    (tmp_path / safe["path"]).unlink()
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "industry_membership_pretest" in validation["failures"]
+
+
+def test_validation_rejects_forged_pretest_membership_content(
+    tmp_path: Path,
+) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    safe = next(
+        item
+        for item in manifest["artifacts"]
+        if item["name"] == "industry_membership_pretest.parquet"
+    )
+    path = tmp_path / safe["path"]
+    frame = pd.read_parquet(path)
+    frame.loc[0, "effective_to"] = pd.Timestamp("2025-06-30")
+    frame.to_parquet(path, index=False)
+    safe["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "industry_membership_pretest" in validation["failures"]
 
 
 @pytest.mark.parametrize(

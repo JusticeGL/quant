@@ -38,7 +38,7 @@ def test_pretest_reader_rejects_locked_boundary_before_any_data_reader(
     with pytest.raises(PermissionError, match="locked test"):
         reader(tmp_path, "missing-snapshot", end_before)
 
-    assert opened == []
+    assert all(not path.endswith("industry_membership.parquet") for path in opened)
 
 
 def test_pretest_market_opens_only_canonical_pre2026_parts_and_filters_rows(
@@ -275,6 +275,20 @@ def test_pretest_exposures_skip_locked_market_cap_and_bound_membership(
             ),
             root="exposures",
         ),
+        _parquet_artifact(
+            tmp_path,
+            snapshot_id,
+            "industry_membership_pretest.parquet",
+            pd.DataFrame(
+                [
+                    {
+                        **_membership("2025-01-01T00:00:00Z"),
+                        "effective_to": pd.Timestamp("2025-12-31"),
+                    }
+                ]
+            ),
+            root="exposures",
+        ),
     ]
     _write_manifest(tmp_path, snapshot_id, "point_in_time_exposure", artifacts)
     real_reader = pd.read_parquet
@@ -285,6 +299,8 @@ def test_pretest_exposures_skip_locked_market_cap_and_bound_membership(
         opened.append(value)
         if "year=2026" in value:
             raise AssertionError("locked partition opened")
+        if value.endswith("industry_membership.parquet"):
+            raise AssertionError("full industry membership opened")
         return real_reader(path, *args, **kwargs)
 
     monkeypatch.setattr(pd, "read_parquet", guarded)
@@ -298,6 +314,43 @@ def test_pretest_exposures_skip_locked_market_cap_and_bound_membership(
     assert membership["industry_id"].tolist() == ["SW:bank"]
     assert membership.loc[0, "effective_to"] == pd.Timestamp("2025-12-31")
     assert all("year=2026" not in path for path in opened)
+    assert all(not path.endswith("industry_membership.parquet") for path in opened)
+
+
+def test_pretest_exposures_fail_closed_without_safe_membership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot_id = "p6x-legacy"
+    artifacts = [
+        _parquet_artifact(
+            tmp_path,
+            snapshot_id,
+            "market_cap/year=2025/part.parquet",
+            pd.DataFrame([_market_cap("2025-12-31")]),
+            root="exposures",
+        ),
+        _parquet_artifact(
+            tmp_path,
+            snapshot_id,
+            "industry_membership.parquet",
+            pd.DataFrame([_membership("2025-01-01T00:00:00Z")]),
+            root="exposures",
+        ),
+    ]
+    _write_manifest(tmp_path, snapshot_id, "point_in_time_exposure", artifacts)
+    real_reader = pd.read_parquet
+    opened: list[str] = []
+
+    def guarded(path: object, *args: object, **kwargs: object) -> pd.DataFrame:
+        opened.append(str(path))
+        return real_reader(path, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", guarded)
+
+    with pytest.raises(ValueError, match="pretest"):
+        read_pretest_exposures(tmp_path, snapshot_id, LOCKED_START)
+
+    assert opened == []
 
 
 def _bar(trade_date: str) -> dict[str, object]:
@@ -389,8 +442,15 @@ def _dated_snapshot_with_known_at(
             _parquet_artifact(
                 data_dir,
                 snapshot_id,
-                "industry_membership.parquet",
-                pd.DataFrame([_membership("2025-01-01T00:00:00Z")]),
+                "industry_membership_pretest.parquet",
+                pd.DataFrame(
+                    [
+                        {
+                            **_membership("2025-01-01T00:00:00Z"),
+                            "effective_to": pd.Timestamp("2025-12-31"),
+                        }
+                    ]
+                ),
                 root="exposures",
             ),
         ]

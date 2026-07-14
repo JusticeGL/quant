@@ -167,6 +167,7 @@ Write stable Zstandard Parquet:
 data/exposures/p6x-*/market_cap/year=YYYY/part.parquet
 data/exposures/p6x-*/industry_definition.parquet
 data/exposures/p6x-*/industry_membership.parquet
+data/exposures/p6x-*/industry_membership_pretest.parquet
 data/manifests/p6x-*/quality_report.json
 data/manifests/p6x-*/manifest.json
 data/state/latest_exposure_snapshot.txt

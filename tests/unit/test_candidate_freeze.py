@@ -829,6 +829,7 @@ def _write_exposure_snapshot(
         for name in (
             "industry_definition.parquet",
             "industry_membership.parquet",
+            "industry_membership_pretest.parquet",
             "market_cap/year=2025/part.parquet",
         )
     ]
@@ -1120,6 +1121,7 @@ def _exposure_quality() -> dict[str, object]:
             "market_cap_count": 1,
             "industry_definition_count": 1,
             "industry_membership_count": 1,
+            "industry_membership_pretest_count": 1,
             "expected_security_count": 1,
             "expected_industry_count": 1,
             "expected_observation_count": 1,

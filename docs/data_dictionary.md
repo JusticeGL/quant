@@ -72,6 +72,7 @@ SHA256。
 | `market.exposure_market_cap` | `trade_date,security_id` | `known_at` | 总市值和流通市值，单位 CNY；按年保留在 Parquet，DuckDB 只登记 artifact |
 | `ref.industry_definition` | `definition_id` | 快照身份 | SW2021 行业定义；`definition_id` 是记录内容 SHA256，`exposure_snapshot_id,industry_id` 唯一 |
 | `ref.industry_membership_history` | `membership_id` | `effective_from,effective_to,known_at` | 证券行业区间；同时外键引用行业定义和 `ref.security` |
+| `ref.industry_membership_pretest_artifact` | artifact SHA256 | 固定 cutoff `2026-01-01` | 仅登记 Parquet artifact，不复制事实；预测试读取器只能打开该物理隔离视图，完整历史仍由 `ref.industry_membership_history` 同步 |
 | `research.factor_freeze` | `freeze_id` | `created_at` | 锁定因子版本、Phase 5/暴露快照、策略哈希、Git commit 与最终测试区间；`freeze_id,freeze_sha256,test_start,test_end` 为唯一候选键 |
 | `research.test_request` | `request_id` | `requested_at` | 携带 `freeze_id,freeze_sha256,test_start,test_end`，复合外键引用完全一致的 freeze；状态固定为 `test_requested` |
 | `research.test_approval` | `approval_id` | `approved_at` | 携带 request、freeze、`confirmed_freeze_sha256` 与测试区间，复合外键保证实名审批精确绑定该 request |
@@ -80,6 +81,12 @@ SHA256。
 `effective_from <= D <= effective_to` 且 `known_at <= D` 时，行业成员记录才在
 日期 `D` 可见。`known_at_source=effective_date_fallback` 表示上游无公告日，
 使用生效日作为保守回退；禁止使用当前行业回填历史。
+
+完整区间保存在 canonical `industry_membership.parquet`。同一快照必须同时包含
+`industry_membership_pretest.parquet`：只保留 `effective_from` 与 `known_at`
+早于 2026-01-01 的记录，空结束日或跨越 cutoff 的结束日固定裁剪为
+2025-12-31。快照验证器从完整工件重新派生并比较内容及确定性 Parquet 字节；
+预测试路径不得打开完整工件。
 
 Catalog 同步在 Task 2 验证后记录 manifest SHA256，并在 DuckDB 写锁与
 事务内重读 manifest、比较 SHA256，然后对 market-cap、raw、quality、

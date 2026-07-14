@@ -47,14 +47,14 @@ def read_pretest_exposures(
         root="exposures",
         datasets=("market_cap",),
     )
-    market_cap = _read_partition_set(selected["market_cap"], end_before)
     membership_artifact = _fixed_artifact(
         data_dir,
         manifest,
         snapshot_id,
         root="exposures",
-        name="industry_membership.parquet",
+        name="industry_membership_pretest.parquet",
     )
+    market_cap = _read_partition_set(selected["market_cap"], end_before)
     membership = pd.read_parquet(membership_artifact)
     _require_columns(
         membership,

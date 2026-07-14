@@ -106,6 +106,12 @@ registration. Only after those checks does it register the Phase 5 parent and
 artifacts and bulk insert industry definitions/membership with
 `INSERT ... SELECT ... ON CONFLICT`.
 
+Both canonical `industry_membership.parquet` and its fixed-cutoff
+`industry_membership_pretest.parquet` derivative are registered and covered by
+the transaction's TOCTOU seal. Only the canonical full artifact populates
+`ref.industry_membership_history`; the pre-test derivative remains an external
+artifact and is never duplicated into a DuckDB fact table.
+
 Small Phase 5 reference artifacts, their quality report and Phase 6 industry
 artifacts are hashed and parsed from the same in-memory byte buffer, so derived
 catalog rows cannot come from bytes different from the verified digest. After

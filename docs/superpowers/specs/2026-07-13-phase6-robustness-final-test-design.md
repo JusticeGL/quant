@@ -24,8 +24,14 @@ the existing secret-safe Tushare provider and immutable raw request cache.
   `log(total_market_cap_cny)` and retains the untransformed values for audit.
 - `index_classify` supplies the SW2021 industry dictionary.
 - `index_member_all` supplies historical constituent intervals for SW2021
-  industries. Industry membership requires
-  `effective_from <= D <= effective_to` and `known_at <= D`.
+industries. Industry membership requires
+`effective_from <= D <= effective_to` and `known_at <= D`.
+- The canonical `industry_membership.parquet` retains the complete approved
+  history for catalog and future approved-test use. Pre-test code can open only
+  `industry_membership_pretest.parquet`, a manifest-bound deterministic view
+  containing rows known and effective before 2026-01-01 with interval ends
+  clipped to 2025-12-31. Snapshot validation re-derives and byte-checks this
+  view from the canonical history.
 - The relay must return every required field. Extra fields may be discarded;
   missing fields, truncation, duplicate keys, interval overlaps, unknown
   securities, or inadequate coverage stop publication.

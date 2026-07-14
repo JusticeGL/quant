@@ -162,6 +162,9 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
         "industry_membership_count": _artifact_row_count(
             artifacts, "industry_membership.parquet"
         ),
+        "industry_membership_pretest_count": _artifact_row_count(
+            artifacts, "industry_membership_pretest.parquet"
+        ),
     }
     expected_observations = summary.get("expected_observation_count")
     observed_observations = summary.get("observed_observation_count")

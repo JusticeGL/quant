@@ -1126,6 +1126,9 @@ def _exposure_dataset_name(name: str) -> str:
     return {
         "industry_definition.parquet": "ref.industry_definition",
         "industry_membership.parquet": "ref.industry_membership_history",
+        "industry_membership_pretest.parquet": (
+            "ref.industry_membership_pretest_artifact"
+        ),
     }[name]
 
 

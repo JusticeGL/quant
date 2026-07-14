@@ -657,7 +657,11 @@ def _validate_phase5_artifact_names(names: list[str], label: str) -> None:
 
 
 def _validate_exposure_artifact_names(names: list[str], label: str) -> None:
-    fixed = {"industry_definition.parquet", "industry_membership.parquet"}
+    fixed = {
+        "industry_definition.parquet",
+        "industry_membership.parquet",
+        "industry_membership_pretest.parquet",
+    }
     market = [name for name in names if name.startswith("market_cap/")]
     pattern = re.compile(r"^market_cap/year=[0-9]{4}/part[.]parquet$")
     if (

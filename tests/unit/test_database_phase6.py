@@ -214,6 +214,13 @@ def test_exposure_snapshot_sync_is_bulk_and_idempotent(tmp_path: Path) -> None:
             FROM ref.industry_membership_history
             """
         ).fetchone()
+        pretest_artifacts = connection.execute(
+            """
+            SELECT count(*)
+            FROM meta.artifact
+            WHERE dataset_name = 'ref.industry_membership_pretest_artifact'
+            """
+        ).fetchone()[0]
 
     assert market_table_count == 0
     assert membership == (
@@ -222,6 +229,7 @@ def test_exposure_snapshot_sync_is_bulk_and_idempotent(tmp_path: Path) -> None:
         pd.Timestamp("2021-01-01").date(),
         None,
     )
+    assert pretest_artifacts == 1
 
 
 def test_exposure_snapshot_sync_rejects_tampered_artifact(tmp_path: Path) -> None:
@@ -337,7 +345,9 @@ def test_exposure_sync_rolls_back_a_forced_mid_transaction_failure(
     assert _transactional_catalog_counts(database_path) == (0, 0, 0, 0)
 
 
-@pytest.mark.parametrize("target", ["market_cap", "raw", "quality", "industry"])
+@pytest.mark.parametrize(
+    "target", ["market_cap", "raw", "quality", "industry", "industry_pretest"]
+)
 def test_exposure_sync_final_seal_rejects_tamper_after_artifact_upsert(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -691,6 +701,12 @@ def _post_validation_target(
             artifact
             for artifact in manifest["artifacts"]
             if artifact["name"] == "industry_membership.parquet"
+        )
+    elif target == "industry_pretest":
+        item = next(
+            artifact
+            for artifact in manifest["artifacts"]
+            if artifact["name"] == "industry_membership_pretest.parquet"
         )
     elif target == "phase5":
         phase5_path = (

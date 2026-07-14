@@ -30,6 +30,8 @@ from alpha_lab.robustness.exposure_data import (
 )
 
 EXPOSURE_SCHEMA_VERSION = 1
+PRETEST_CUTOFF = date(2026, 1, 1)
+PRETEST_END = pd.Timestamp("2025-12-31")
 
 
 def build_exposure_snapshot(config_dir: Path, data_dir: Path) -> ExposureSnapshotResult:
@@ -81,6 +83,9 @@ def materialize_exposure_snapshot(
     )
     if quality["status"] == "error":
         raise ValueError("exposure data quality gates failed")
+    pretest_membership = derive_pretest_membership(tables.industry_membership)
+    quality_summary = cast(dict[str, object], quality["summary"])
+    quality_summary["industry_membership_pretest_count"] = len(pretest_membership)
 
     exposure_root = data_dir / "exposures"
     exposure_root.mkdir(parents=True, exist_ok=True)
@@ -250,6 +255,7 @@ def validate_exposure_snapshot(data_dir: Path, snapshot_id: str) -> dict[str, ob
         failures.append("identity_sha256")
     failures.extend(_phase5_dependency_failures(data_dir, manifest))
     failures.extend(_artifact_layout_failures(data_dir, manifest))
+    failures.extend(_pretest_membership_failures(data_dir, manifest))
     for item in [*manifest.get("raw_inputs", []), *manifest.get("artifacts", [])]:
         path = data_dir / str(item["path"])
         checked += 1
@@ -338,7 +344,55 @@ def _write_tables(root: Path, tables: ExposureTables) -> list[dict[str, object]]
             ["security_id", "effective_from", "industry_id"],
         )
     )
+    artifacts.append(
+        _write_frame(
+            root,
+            "industry_membership_pretest.parquet",
+            derive_pretest_membership(tables.industry_membership),
+            ["security_id", "effective_from", "industry_id"],
+        )
+    )
     return sorted(artifacts, key=lambda item: str(item["name"]))
+
+
+def derive_pretest_membership(full: pd.DataFrame) -> pd.DataFrame:
+    required = {
+        "security_id",
+        "industry_id",
+        "effective_from",
+        "effective_to",
+        "known_at",
+    }
+    missing = sorted(required - set(full.columns))
+    if missing:
+        raise ValueError(f"industry membership is missing pre-test fields: {missing}")
+    result = full.copy()
+    result["effective_from"] = pd.to_datetime(
+        result["effective_from"], errors="raise"
+    ).dt.normalize()
+    result["effective_to"] = pd.to_datetime(
+        result["effective_to"], errors="coerce"
+    ).dt.normalize()
+    result["known_at"] = pd.to_datetime(result["known_at"], errors="raise", utc=True)
+    cutoff = pd.Timestamp(PRETEST_CUTOFF)
+    known_cutoff = pd.Timestamp(PRETEST_CUTOFF, tz="UTC")
+    result = result.loc[
+        (result["effective_from"] < cutoff) & (result["known_at"] < known_cutoff)
+    ].copy()
+    result["effective_to"] = result["effective_to"].where(
+        result["effective_to"].notna() & (result["effective_to"] < cutoff),
+        PRETEST_END,
+    )
+    if (
+        (result["effective_from"] >= cutoff).any()
+        or (result["effective_to"] >= cutoff).any()
+        or (result["known_at"] >= known_cutoff).any()
+        or result["effective_to"].isna().any()
+    ):
+        raise ValueError("derived pre-test membership crosses the locked boundary")
+    return result.sort_values(
+        ["security_id", "effective_from", "industry_id"], kind="stable"
+    ).reset_index(drop=True)
 
 
 def _artifact_layout_failures(data_dir: Path, manifest: dict[str, Any]) -> list[str]:
@@ -405,6 +459,7 @@ def _require_artifact_names(artifacts: object) -> list[str]:
     fixed_names = {
         "industry_definition.parquet",
         "industry_membership.parquet",
+        "industry_membership_pretest.parquet",
     }
     market_pattern = re.compile(r"^market_cap/year=[0-9]{4}/part[.]parquet$")
     if any(
@@ -474,13 +529,16 @@ def _recompute_quality_report(
     membership = _read_verified_frame(
         data_dir, artifacts["industry_membership.parquet"]
     )
+    pretest_membership = _read_verified_frame(
+        data_dir, artifacts["industry_membership_pretest.parquet"]
+    )
     tables = ExposureTables(
         market_cap=pd.concat(market_parts, ignore_index=True),
         industry_definition=definitions,
         industry_membership=membership,
     )
     observations = context["observations"]
-    return validate_exposure_tables(
+    quality = validate_exposure_tables(
         tables,
         set(context["security"]["security_id"].astype(str)),
         expected_security_ids=set(observations["security_id"].astype(str)),
@@ -490,6 +548,41 @@ def _recompute_quality_report(
         market_start_date=start_date,
         market_end_date=end_date,
     )
+    cast(dict[str, object], quality["summary"])["industry_membership_pretest_count"] = (
+        len(pretest_membership)
+    )
+    return quality
+
+
+def _pretest_membership_failures(data_dir: Path, manifest: dict[str, Any]) -> list[str]:
+    try:
+        artifacts = {
+            str(item["name"]): item
+            for item in manifest["artifacts"]
+            if isinstance(item, dict)
+        }
+        full = _read_verified_frame(data_dir, artifacts["industry_membership.parquet"])
+        safe_item = artifacts["industry_membership_pretest.parquet"]
+        safe = _read_verified_frame(data_dir, safe_item)
+        expected = derive_pretest_membership(full)
+        pd.testing.assert_frame_equal(
+            safe.reset_index(drop=True),
+            expected.reset_index(drop=True),
+            check_dtype=True,
+            check_like=False,
+        )
+        with tempfile.TemporaryDirectory(prefix="p6x-pretest-verify-") as directory:
+            artifact = _write_frame(
+                Path(directory),
+                "industry_membership_pretest.parquet",
+                expected,
+                ["security_id", "effective_from", "industry_id"],
+            )
+            if artifact["sha256"] != safe_item["sha256"]:
+                raise ValueError("pre-test membership bytes differ from derivation")
+    except (AssertionError, KeyError, TypeError, ValueError, OSError):
+        return ["industry_membership_pretest"]
+    return []
 
 
 def _read_verified_frame(data_dir: Path, artifact: dict[str, Any]) -> pd.DataFrame:
