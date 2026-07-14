@@ -4,9 +4,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import pytest
 
+from alpha_lab.database import catalog
 from alpha_lab.robustness import final_test
+from alpha_lab.robustness.approval import canonical_bytes
 from alpha_lab.robustness.final_test import run_final_test
 
 
@@ -150,6 +153,39 @@ def test_authorized_execution_failure_keeps_immutable_audit(
     assert result_path.with_name("report.md").is_file()
 
 
+def test_final_test_run_catalog_audit_is_idempotent_and_conflict_safe(
+    tmp_path: Path,
+) -> None:
+    state = _validated_fixture(tmp_path)
+    database = tmp_path / "data/metadata.duckdb"
+    _seed_final_catalog(database, state)
+    state["catalog_database"] = database
+    state["started_at"] = "2026-07-14T00:00:00+00:00"
+    result = {
+        "test_run_id": "final-" + "9" * 64,
+        "status": "test_completed",
+        "result": {"metrics": {"mean_rank_ic": -0.01}},
+    }
+    output = tmp_path / "result.json"
+    output.write_bytes(canonical_bytes(result))
+    output.with_name("report.md").write_text("report\n", encoding="utf-8")
+
+    final_test._record_final_run(state, result, output)
+    final_test._record_final_run(state, result, output)
+    with duckdb.connect(str(database), read_only=True) as connection:
+        row = connection.execute(
+            "SELECT count(*), min(status) FROM research.final_test_run"
+        ).fetchone()
+    assert row == (1, "success")
+
+    with duckdb.connect(str(database)) as connection:
+        connection.execute(
+            "UPDATE research.final_test_run SET run_sha256 = repeat('0', 64)"
+        )
+    with pytest.raises(RuntimeError, match="catalog registration conflict"):
+        final_test._record_final_run(state, result, output)
+
+
 def _validated_fixture(tmp_path: Path) -> dict[str, Any]:
     return {
         "approval_id": "approval-" + "a" * 64,
@@ -167,3 +203,73 @@ def _validated_fixture(tmp_path: Path) -> dict[str, Any]:
         "test": {"start": "2026-01-01", "end": "2026-07-11"},
         "experiments_dir": tmp_path,
     }
+
+
+def _seed_final_catalog(database: Path, state: dict[str, Any]) -> None:
+    catalog.initialize_database(database)
+    with duckdb.connect(str(database)) as connection:
+        connection.execute(
+            """
+            INSERT INTO research.factor_definition
+                (factor_id, name, family)
+            VALUES ('F1002', 'fixture-factor', 'fixture')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO research.factor_version
+                (factor_version_id, factor_id, formula, implementation_path,
+                 code_sha256, metadata_sha256, lookback, direction)
+            VALUES ('F1002-fixture', 'F1002', 'fixture', 'fixture.py',
+                    repeat('1', 64), repeat('2', 64), 1, 1)
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO research.factor_freeze
+                (freeze_id, freeze_sha256, factor_version_id,
+                 phase5_snapshot_id, exposure_snapshot_id,
+                 robustness_policy_sha256, cost_policy_sha256, code_commit,
+                 test_start, test_end, manifest_artifact_id)
+            VALUES (?, ?, 'F1002-fixture', ?, ?, repeat('3', 64),
+                    repeat('4', 64), 'fixture', DATE '2026-01-01',
+                    DATE '2026-07-11', repeat('5', 64))
+            """,
+            [
+                state["freeze_id"],
+                state["freeze_sha256"],
+                state["snapshots"]["phase5"]["snapshot_id"],
+                state["snapshots"]["exposure"]["snapshot_id"],
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO research.test_request
+                (request_id, request_sha256, freeze_id, freeze_sha256,
+                 robustness_report_sha256, test_start, test_end)
+            VALUES (?, ?, ?, ?, repeat('6', 64), DATE '2026-01-01',
+                    DATE '2026-07-11')
+            """,
+            [
+                state["request_id"],
+                state["request_sha256"],
+                state["freeze_id"],
+                state["freeze_sha256"],
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO research.test_approval
+                (approval_id, approval_sha256, request_id, freeze_id,
+                 confirmed_freeze_sha256, test_start, test_end, approver)
+            VALUES (?, ?, ?, ?, ?, DATE '2026-01-01', DATE '2026-07-11',
+                    'fixture reviewer')
+            """,
+            [
+                state["approval_id"],
+                state["approval_sha256"],
+                state["request_id"],
+                state["freeze_id"],
+                state["freeze_sha256"],
+            ],
+        )

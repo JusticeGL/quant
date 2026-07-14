@@ -196,6 +196,24 @@ hashes, policy hashes, request, approval, and explicit test range before opening
 test data. A changed input makes the approval invalid. Repeating the same test
 is idempotent; a different result for an existing test run ID is an error.
 
+Task 6 does not trust the published gate booleans alone. Request creation parses
+the complete walk-forward, fixed four-scenario cost, and exposure JSON reports,
+checks their common freeze/dependency identities and fixed five-fold diagnostic
+shape, recomputes the four gates with the locked robustness policy, and verifies
+the deterministic Markdown bytes. The request also pins an execution bundle of
+all effective evaluation/baseline/split/registry configuration and the imported
+factor, metric, backtest, walk-forward, exposure, and report source modules.
+Every bundle byte is rechecked before locked data access.
+
+The cooperative administrative anchor is the schema-v3 DuckDB catalog. Request
+creation transactionally registers the exact freeze and request; explicit human
+approval registers the exact approval. Final-test authorization opens that
+catalog read-only, verifies the exact migration ledger and exact freeze/request/
+approval tuples before any locked read, then records the immutable success or
+failure run. Manual DuckDB rewriting or replacement by a same-permission writer
+remains outside this threat model; resisting that actor requires external
+signatures or independently enforced read-only storage.
+
 ## Artifacts and immutability
 
 Small auditable artifacts live under:

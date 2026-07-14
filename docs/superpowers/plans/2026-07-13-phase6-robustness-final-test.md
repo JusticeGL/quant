@@ -436,6 +436,12 @@ Expected: FAIL because approval and final-test modules are missing.
 
 A request contains the freeze ID/hash, robustness report hash, all gate results, exact locked range, and `status=test_requested`. Approval requires a non-empty approver and exact freeze hash, and contains request hash, approval timestamp, and `status=approved`. IDs derive from canonical content excluding their own ID field.
 
+The implementation additionally revalidates the full Task 5 JSON set and
+recomputes the gates, pins the effective config/code execution bundle in the
+request, and records exact freeze/request/approval tuples in the existing
+schema-v3 catalog. The catalog is verified read-only before locked access; no
+new migration is required.
+
 - [ ] **Step 4: Implement final-test validation before data access**
 
 Validate approval, request, freeze, candidate, policy, cost, Phase 5, and exposure hashes in that order. Only then read 2026-01-01 through 2026-07-11 partitions. Use the same factor, metrics, cost scenarios, and exposure functions without applying pre-test gates to hide or suppress results. Publish immutable `result.json` and `report.md` even when results are unfavorable.

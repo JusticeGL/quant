@@ -136,6 +136,17 @@ protected workflow. Resistance to a same-privilege malicious database writer
 would require a trust root outside this data directory, such as externally
 managed signatures or independently enforced read-only storage.
 
+The same boundary applies to Phase 6 final-test authorization. Existing schema
+v3 tables `research.factor_freeze`, `research.test_request`,
+`research.test_approval`, and `research.final_test_run` hold the exact immutable
+artifact hashes, locked range, statuses, approver, and final audit references.
+Request/approval registration is transactional and conflicts fail closed. The
+final loader verifies the exact packaged migration ledger and exact
+freeze/request/approval rows read-only before opening a 2026 partition. These
+rows prevent coherent JSON re-signing by a process without catalog-write
+authority; they are not an external signature against a same-permission DuckDB
+writer.
+
 Small Phase 5 reference artifacts, their quality report and Phase 6 industry
 artifacts are hashed and parsed from the same in-memory byte buffer, so derived
 catalog rows cannot come from bytes different from the verified digest. After

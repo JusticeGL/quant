@@ -7,10 +7,12 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import pandas as pd
 
 from alpha_lab.baseline.backtest import run_topk_backtest
 from alpha_lab.baseline.config import load_phase2_config
+from alpha_lab.database import catalog
 from alpha_lab.evaluation.config import load_evaluation_config
 from alpha_lab.evaluation.metrics import calculate_factor_metrics, prepare_factor_values
 from alpha_lab.factors.contract import validate_factor_output
@@ -18,6 +20,7 @@ from alpha_lab.factors.registry import FactorRegistry
 from alpha_lab.robustness.approval import (
     _write_immutable,
     canonical_bytes,
+    validate_execution_bundle_files,
     validate_approval,
     validate_test_request,
 )
@@ -81,6 +84,7 @@ def run_final_test(
         / "final"
         / test_run_id
     )
+    state["started_at"] = pd.Timestamp.now(tz="UTC").isoformat()
     try:
         market = _read_locked_market(
             data_dir,
@@ -100,7 +104,8 @@ def run_final_test(
                 "message": str(error),
             },
         }
-        _publish_final(output_dir, failed)
+        failed_path = _publish_final(output_dir, failed)
+        _record_final_run(state, failed, failed_path)
         raise
     result = {
         **run_identity,
@@ -109,7 +114,9 @@ def run_final_test(
         "test_accessed": True,
         "result": evaluation,
     }
-    return _publish_final(output_dir, result)
+    result_path = _publish_final(output_dir, result)
+    _record_final_run(state, result, result_path)
+    return result_path
 
 
 def _publish_final(output_dir: Path, result: dict[str, Any]) -> Path:
@@ -136,9 +143,14 @@ def _validate_approval(state: dict[str, Any]) -> dict[str, Any]:
         document = validate_approval(path)
     except ValueError as error:
         raise PermissionError("explicit final-test approval is invalid") from error
+    database_path = state["data_dir"] / "metadata.duckdb"
+    admin = _read_admin_approval(database_path, document, _sha256(path))
     return {
         **document,
         "approval_sha256": _sha256(path),
+        "catalog_database": database_path,
+        "admin_test_start": admin[0],
+        "admin_test_end": admin[1],
     }
 
 
@@ -147,6 +159,14 @@ def _validate_request(state: dict[str, Any]) -> dict[str, Any]:
     request_path = approval_path.parent.parent / "test_request.json"
     _trusted_file(request_path, state["experiments_dir"], "test request")
     document = validate_test_request(request_path)
+    validate_execution_bundle_files(document, state["config_dir"].parent)
+    evaluation, evaluation_sha256 = load_evaluation_config(
+        state["config_dir"] / "factor_evaluation.yaml"
+    )
+    phase2 = load_phase2_config(state["config_dir"])
+    walk = _read_json(request_path.parent / "walk_forward.json", "walk-forward")
+    if walk.get("evaluation_policy_sha256") != evaluation_sha256:
+        raise ValueError("evaluation policy hash differs from robustness report")
     if (
         document["request_id"] != state["request_id"]
         or _sha256(request_path) != state["request_sha256"]
@@ -163,10 +183,20 @@ def _validate_request(state: dict[str, Any]) -> dict[str, Any]:
             or _sha256(path) != reference["sha256"]
         ):
             raise ValueError(f"request robustness artifact drift: {name}")
+    _read_admin_request(
+        state["catalog_database"],
+        document,
+        _sha256(request_path),
+        state["admin_test_start"],
+        state["admin_test_end"],
+    )
     return {
         "request_path": request_path,
         "request_sha256": _sha256(request_path),
         "locked_test": document["locked_test"],
+        "evaluation_config": evaluation,
+        "evaluation_policy_sha256": evaluation_sha256,
+        "phase2_config": phase2,
     }
 
 
@@ -211,6 +241,7 @@ def _validate_freeze(state: dict[str, Any]) -> dict[str, Any]:
         != state["experiments_dir"] / "phase6" / str(freeze["freeze_id"])
     ):
         raise ValueError("freeze hash link or locked range does not match request")
+    _read_admin_freeze(state["catalog_database"], freeze)
     return freeze
 
 
@@ -226,7 +257,12 @@ def _validate_candidate(state: dict[str, Any]) -> dict[str, Any]:
             or _sha256(path) != factor[f"{key}_sha256"]
         ):
             raise ValueError(f"candidate {key} hash drift")
-    return {}
+    registry = FactorRegistry(
+        root / "src" / "alpha_lab" / "factors" / "candidates",
+        state["config_dir"] / "factor_registry.yaml",
+    )
+    candidate = registry.get(str(factor["factor_id"]))
+    return {"candidate": candidate}
 
 
 def _validate_policy(state: dict[str, Any]) -> dict[str, Any]:
@@ -358,18 +394,12 @@ def _read_locked_exposures(
 
 
 def _evaluate_locked_test(market: pd.DataFrame, state: dict[str, Any]) -> dict[str, Any]:
-    config_dir = state["config_dir"]
     robustness = state["robustness_config"]
-    evaluation, evaluation_sha256 = load_evaluation_config(
-        config_dir / "factor_evaluation.yaml"
-    )
-    phase2 = load_phase2_config(config_dir)
+    evaluation = state["evaluation_config"]
+    evaluation_sha256 = state["evaluation_policy_sha256"]
+    phase2 = state["phase2_config"]
     factor_id = state["factor"]["factor_id"]
-    registry = FactorRegistry(
-        config_dir.parent / "src" / "alpha_lab" / "factors" / "candidates",
-        config_dir / "factor_registry.yaml",
-    )
-    candidate = registry.get(factor_id)
+    candidate = state["candidate"]
     raw_scores = validate_factor_output(candidate, market)
     scores = prepare_factor_values(raw_scores, candidate.metadata.direction, evaluation)
     test = state["test"]
@@ -459,6 +489,200 @@ def _concat_required(frames: list[pd.DataFrame], label: str) -> pd.DataFrame:
     if result.empty:
         raise ValueError(f"{label} is empty")
     return result
+
+
+def _read_admin_approval(
+    database_path: Path,
+    approval: dict[str, Any],
+    approval_sha256: str,
+) -> tuple[str, str]:
+    _require_catalog_migrations(database_path)
+    with duckdb.connect(str(database_path), read_only=True) as connection:
+        rows = connection.execute(
+            """
+            SELECT approval_sha256, request_id, freeze_id,
+                   confirmed_freeze_sha256, CAST(test_start AS VARCHAR),
+                   CAST(test_end AS VARCHAR), approver, status
+            FROM research.test_approval WHERE approval_id = ?
+            """,
+            [approval["approval_id"]],
+        ).fetchall()
+    expected_prefix = (
+        approval_sha256,
+        approval["request_id"],
+        approval["freeze_id"],
+        approval["freeze_sha256"],
+    )
+    if (
+        len(rows) != 1
+        or tuple(rows[0][:4]) != expected_prefix
+        or rows[0][6] != approval["approver"]
+        or rows[0][7] != "approved"
+    ):
+        raise PermissionError("approval administrative catalog anchor mismatch")
+    return str(rows[0][4]), str(rows[0][5])
+
+
+def _read_admin_request(
+    database_path: Path,
+    request: dict[str, Any],
+    request_sha256: str,
+    test_start: str,
+    test_end: str,
+) -> None:
+    with duckdb.connect(str(database_path), read_only=True) as connection:
+        rows = connection.execute(
+            """
+            SELECT request_sha256, freeze_id, freeze_sha256,
+                   robustness_report_sha256, CAST(test_start AS VARCHAR),
+                   CAST(test_end AS VARCHAR), status
+            FROM research.test_request WHERE request_id = ?
+            """,
+            [request["request_id"]],
+        ).fetchall()
+    expected = (
+        request_sha256,
+        request["freeze_id"],
+        request["freeze_sha256"],
+        request["robustness_artifacts"]["robustness_report.md"]["sha256"],
+        request["locked_test"]["start"],
+        request["locked_test"]["end"],
+        "test_requested",
+    )
+    if (
+        len(rows) != 1
+        or tuple(rows[0]) != expected
+        or test_start != request["locked_test"]["start"]
+        or test_end != request["locked_test"]["end"]
+    ):
+        raise PermissionError("request administrative catalog anchor mismatch")
+
+
+def _read_admin_freeze(database_path: Path, freeze: dict[str, Any]) -> None:
+    with duckdb.connect(str(database_path), read_only=True) as connection:
+        rows = connection.execute(
+            """
+            SELECT freeze_sha256, factor_version_id,
+                   phase5_snapshot_id, exposure_snapshot_id,
+                   robustness_policy_sha256, cost_policy_sha256, code_commit,
+                   CAST(test_start AS VARCHAR), CAST(test_end AS VARCHAR), status
+            FROM research.factor_freeze WHERE freeze_id = ?
+            """,
+            [freeze["freeze_id"]],
+        ).fetchall()
+    expected = (
+        freeze["freeze_sha256"],
+        f"{freeze['factor']['factor_id']}-{freeze['factor']['source_sha256'][:20]}",
+        freeze["snapshots"]["phase5"]["snapshot_id"],
+        freeze["snapshots"]["exposure"]["snapshot_id"],
+        freeze["policies"]["robustness"]["sha256"],
+        freeze["policies"]["costs"]["sha256"],
+        freeze["git_commit"],
+        freeze["test"]["start"],
+        freeze["test"]["end"],
+        "frozen",
+    )
+    if len(rows) != 1 or tuple(rows[0]) != expected:
+        raise PermissionError("freeze administrative catalog anchor mismatch")
+
+
+def _require_catalog_migrations(database_path: Path) -> None:
+    if database_path.is_symlink() or not database_path.is_file():
+        raise PermissionError("approval administrative catalog is missing")
+    try:
+        with duckdb.connect(str(database_path), read_only=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT version, name, sha256
+                FROM meta.schema_migration ORDER BY version
+                """
+            ).fetchall()
+    except (duckdb.Error, OSError) as error:
+        raise PermissionError("approval administrative catalog is invalid") from error
+    actual = tuple((int(row[0]), str(row[1]), str(row[2])) for row in rows)
+    if actual != catalog.migration_records():
+        raise PermissionError("approval catalog migration identity mismatch")
+
+
+def _record_final_run(
+    state: dict[str, Any], result: dict[str, Any], result_path: Path
+) -> None:
+    database_path = state.get("catalog_database")
+    if not isinstance(database_path, Path):
+        return
+    report_path = result_path.with_name("report.md")
+    result_artifact_id = _sha256(result_path)
+    report_artifact_id = _sha256(report_path)
+    run_sha256 = hashlib.sha256(
+        canonical_bytes(
+            {
+                "test_run_id": result["test_run_id"],
+                "result_sha256": result_artifact_id,
+                "report_sha256": report_artifact_id,
+                "status": result["status"],
+            }
+        )
+    ).hexdigest()
+    finished_at = pd.Timestamp.now(tz="UTC").isoformat()
+    status = "success" if result["status"] == "test_completed" else "failed"
+    with catalog._catalog_write_lock(database_path):
+        with duckdb.connect(str(database_path)) as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO research.final_test_run
+                        (test_run_id, run_sha256, approval_id, request_id,
+                         freeze_id, freeze_sha256, result_artifact_id,
+                         report_artifact_id, status, test_start, test_end,
+                         summary, started_at, finished_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS DATE),
+                            CAST(? AS DATE), ?, CAST(? AS TIMESTAMPTZ),
+                            CAST(? AS TIMESTAMPTZ))
+                    ON CONFLICT (test_run_id) DO NOTHING
+                    """,
+                    [
+                        result["test_run_id"],
+                        run_sha256,
+                        state["approval_id"],
+                        state["request_id"],
+                        state["freeze_id"],
+                        state["freeze_sha256"],
+                        result_artifact_id,
+                        report_artifact_id,
+                        status,
+                        state["test"]["start"],
+                        state["test"]["end"],
+                        json.dumps(result, sort_keys=True, default=str),
+                        state["started_at"],
+                        finished_at,
+                    ],
+                )
+                stored = connection.execute(
+                    """
+                    SELECT run_sha256, approval_id, request_id, freeze_id,
+                           freeze_sha256, result_artifact_id,
+                           report_artifact_id, status
+                    FROM research.final_test_run WHERE test_run_id = ?
+                    """,
+                    [result["test_run_id"]],
+                ).fetchall()
+                expected = (
+                    run_sha256,
+                    state["approval_id"],
+                    state["request_id"],
+                    state["freeze_id"],
+                    state["freeze_sha256"],
+                    result_artifact_id,
+                    report_artifact_id,
+                    status,
+                )
+                if len(stored) != 1 or tuple(stored[0]) != expected:
+                    raise RuntimeError("final-test catalog registration conflict")
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:

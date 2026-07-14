@@ -9,6 +9,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import duckdb
+import yaml
+
+from alpha_lab.database import catalog
+from alpha_lab.factors.contract import FactorMetadata
+from alpha_lab.robustness.config import load_robustness_config
+from alpha_lab.robustness.report import _markdown
+from alpha_lab.robustness.walk_forward import evaluate_gates
+
 REQUEST_SCHEMA_VERSION = 1
 APPROVAL_SCHEMA_VERSION = 1
 _GATE_NAMES = {
@@ -23,6 +32,30 @@ _ROBUSTNESS_ARTIFACTS = (
     "exposure_report.json",
     "robustness_report.md",
 )
+_EXECUTION_CONFIGS = (
+    "baseline.yaml",
+    "costs.yaml",
+    "factor_evaluation.yaml",
+    "factor_registry.yaml",
+    "robustness.yaml",
+    "splits.yaml",
+)
+_EXECUTION_MODULES = (
+    "src/alpha_lab/baseline/backtest.py",
+    "src/alpha_lab/baseline/config.py",
+    "src/alpha_lab/evaluation/config.py",
+    "src/alpha_lab/evaluation/metrics.py",
+    "src/alpha_lab/factors/contract.py",
+    "src/alpha_lab/factors/registry.py",
+    "src/alpha_lab/robustness/approval.py",
+    "src/alpha_lab/robustness/config.py",
+    "src/alpha_lab/robustness/exposures.py",
+    "src/alpha_lab/robustness/final_test.py",
+    "src/alpha_lab/robustness/freeze.py",
+    "src/alpha_lab/robustness/io.py",
+    "src/alpha_lab/robustness/report.py",
+    "src/alpha_lab/robustness/walk_forward.py",
+)
 
 
 def create_test_request(freeze_path: Path) -> Path:
@@ -30,8 +63,14 @@ def create_test_request(freeze_path: Path) -> Path:
     if freeze_dir.is_symlink():
         raise ValueError("freeze directory is untrusted")
     freeze = _read_canonical_json(freeze_path, "freeze")
+    repo_root = freeze_path.parents[3]
     if freeze_path.name != "freeze.json" or freeze.get("freeze_id") != freeze_dir.name:
         raise ValueError("freeze layout or identity is invalid")
+    expected_freeze = (
+        repo_root / "experiments" / "phase6" / str(freeze["freeze_id"]) / "freeze.json"
+    )
+    if freeze_path != expected_freeze:
+        raise ValueError("freeze path is outside the repository experiments root")
     freeze_sha256 = _sha256(freeze_path)
     artifacts = {
         name: {
@@ -40,18 +79,9 @@ def create_test_request(freeze_path: Path) -> Path:
         }
         for name in _ROBUSTNESS_ARTIFACTS
     }
-    walk = _read_canonical_json(freeze_dir / "walk_forward.json", "walk-forward")
-    gates = walk.get("gates")
-    if (
-        walk.get("freeze_id") != freeze.get("freeze_id")
-        or walk.get("freeze_sha256") != freeze_sha256
-        or walk.get("test_accessed") is not False
-        or walk.get("passed") is not True
-        or not isinstance(gates, dict)
-        or set(gates) != _GATE_NAMES
-        or any(value is not True for value in gates.values())
-    ):
-        raise PermissionError("robustness gate has not passed for this freeze")
+    gates = _validate_robustness_artifacts(
+        freeze_dir, freeze, freeze_sha256, repo_root / "config"
+    )
     test = freeze.get("test")
     if test != {
         "access": "human_approval_only",
@@ -65,6 +95,7 @@ def create_test_request(freeze_path: Path) -> Path:
         "freeze_id": freeze["freeze_id"],
         "freeze_sha256": freeze_sha256,
         "robustness_artifacts": artifacts,
+        "execution_bundle": _execution_bundle(repo_root, freeze),
         "gates": gates,
         "locked_test": test,
     }
@@ -72,6 +103,7 @@ def create_test_request(freeze_path: Path) -> Path:
     document = {**identity, "request_id": f"request-{digest}"}
     path = freeze_dir / "test_request.json"
     _write_immutable(path, canonical_bytes(document), "test request")
+    _register_test_request(repo_root / "data" / "metadata.duckdb", freeze, document, path)
     return path
 
 
@@ -81,6 +113,17 @@ def approve_test_request(
     _validate_approver(approver)
     request = validate_test_request(request_path)
     _validate_request_files(request_path, request)
+    repo_root = request_path.parents[3]
+    expected_request = (
+        repo_root
+        / "experiments"
+        / "phase6"
+        / str(request["freeze_id"])
+        / "test_request.json"
+    )
+    if request_path != expected_request:
+        raise ValueError("test request is outside the repository experiments root")
+    validate_execution_bundle_files(request, repo_root)
     if confirmed_freeze_sha256 != request["freeze_sha256"]:
         raise PermissionError("freeze confirmation does not match the test request")
     approval_dir = request_path.parent / "approvals"
@@ -98,6 +141,12 @@ def approve_test_request(
                 and document["freeze_sha256"] == confirmed_freeze_sha256
                 and document["approver"] == approver
             ):
+                _register_test_approval(
+                    repo_root / "data" / "metadata.duckdb",
+                    request,
+                    document,
+                    current,
+                )
                 return current
     identity = {
         "schema_version": APPROVAL_SCHEMA_VERSION,
@@ -113,6 +162,9 @@ def approve_test_request(
     document = {**identity, "approval_id": f"approval-{digest}"}
     path = approval_dir / f"approval-{digest}.json"
     _write_immutable(path, canonical_bytes(document), "approval")
+    _register_test_approval(
+        repo_root / "data" / "metadata.duckdb", request, document, path
+    )
     return path
 
 
@@ -125,6 +177,7 @@ def validate_test_request(path: Path) -> dict[str, Any]:
         "freeze_id",
         "freeze_sha256",
         "robustness_artifacts",
+        "execution_bundle",
         "gates",
         "locked_test",
     }
@@ -158,6 +211,7 @@ def validate_test_request(path: Path) -> dict[str, Any]:
             or not _sha(reference.get("sha256"))
         ):
             raise ValueError("test request robustness artifact reference is invalid")
+    _validate_execution_bundle_schema(document.get("execution_bundle"))
     if path.name != "test_request.json" or path.parent.name != document["freeze_id"]:
         raise ValueError("test request path does not match its freeze identity")
     return document
@@ -190,7 +244,11 @@ def validate_approval(path: Path) -> dict[str, Any]:
     ):
         raise ValueError("approval schema or identity is invalid")
     _validate_approver(document.get("approver"))
-    if path.name != f"{document['approval_id']}.json":
+    if (
+        path.name != f"{document['approval_id']}.json"
+        or path.parent.name != "approvals"
+        or path.parent.parent.name != document["freeze_id"]
+    ):
         raise ValueError("approval path does not match its identity")
     return document
 
@@ -274,6 +332,460 @@ def _validate_request_files(path: Path, request: dict[str, Any]) -> None:
             or _sha256(artifact) != reference["sha256"]
         ):
             raise ValueError(f"test request robustness hash has drifted: {name}")
+
+
+def _validate_robustness_artifacts(
+    freeze_dir: Path,
+    freeze: dict[str, Any],
+    freeze_sha256: str,
+    config_dir: Path,
+) -> dict[str, bool]:
+    walk = _read_canonical_json(freeze_dir / "walk_forward.json", "walk-forward")
+    costs = _read_canonical_json(
+        freeze_dir / "cost_sensitivity.json", "cost sensitivity"
+    )
+    exposure = _read_canonical_json(
+        freeze_dir / "exposure_report.json", "exposure report"
+    )
+    common_keys = {
+        "schema_version",
+        "freeze_id",
+        "factor_id",
+        "freeze_sha256",
+        "robustness_policy_sha256",
+        "evaluation_policy_sha256",
+        "dependencies",
+        "orientation",
+        "test_accessed",
+    }
+    if set(walk) != common_keys | {"folds", "gates", "passed"}:
+        raise ValueError("walk-forward report schema is invalid")
+    if set(costs) != common_keys | {"scenarios"}:
+        raise ValueError("cost-sensitivity report schema is invalid")
+    if set(exposure) != common_keys | {"size", "industry", "missing"}:
+        raise ValueError("exposure report schema is invalid")
+    common = {key: walk[key] for key in common_keys}
+    if any({key: document[key] for key in common_keys} != common for document in (costs, exposure)):
+        raise ValueError("robustness report dependency linkage is inconsistent")
+    factor = freeze.get("factor", {})
+    snapshots = freeze.get("snapshots", {})
+    policies = freeze.get("policies", {})
+    expected_dependencies = {
+        "phase5_manifest_sha256": snapshots["phase5"]["manifest_sha256"],
+        "exposure_manifest_sha256": snapshots["exposure"]["manifest_sha256"],
+        "cost_policy_sha256": policies["costs"]["sha256"],
+        "factor_source_sha256": factor["source_sha256"],
+        "factor_metadata_sha256": factor["metadata_sha256"],
+    }
+    if (
+        common["schema_version"] != 1
+        or common["freeze_id"] != freeze.get("freeze_id")
+        or common["freeze_sha256"] != freeze_sha256
+        or common["factor_id"] != factor.get("factor_id")
+        or common["robustness_policy_sha256"]
+        != policies["robustness"]["sha256"]
+        or common["dependencies"] != expected_dependencies
+        or not _sha(common["evaluation_policy_sha256"])
+        or common["orientation"]
+        != {
+            "candidate_direction": -1,
+            "score_formula": "score=standardize(winsorize(value*direction))",
+            "direction_consistency_source": "oriented_mean_rank_ic_positive",
+        }
+        or common["test_accessed"] is not False
+    ):
+        raise ValueError("robustness report freeze or dependency link is invalid")
+    config, policy_sha256 = load_robustness_config(config_dir / "robustness.yaml")
+    if policy_sha256 != common["robustness_policy_sha256"]:
+        raise ValueError("robustness report policy has drifted")
+    folds = walk["folds"]
+    expected_folds = config.walk_forward_folds
+    if not isinstance(folds, list) or len(folds) != len(expected_folds):
+        raise ValueError("walk-forward report must contain five folds")
+    fold_keys = {
+        "fold_id",
+        "start",
+        "end",
+        "input_row_count",
+        "valid_row_count",
+        "coverage",
+        "mean_ic",
+        "mean_rank_ic",
+        "icir",
+        "rank_icir",
+        "group_returns",
+        "factor_turnover",
+        "direction_consistent",
+    }
+    for actual, expected in zip(folds, expected_folds, strict=True):
+        if (
+            not isinstance(actual, dict)
+            or set(actual) != fold_keys
+            or actual["fold_id"] != expected.fold_id
+            or actual["start"] != expected.start.isoformat()
+            or actual["end"] != expected.end.isoformat()
+            or not isinstance(actual["coverage"], (int, float))
+            or not 0 <= float(actual["coverage"]) <= 1
+            or actual["direction_consistent"]
+            is not (actual["mean_rank_ic"] is not None and float(actual["mean_rank_ic"]) > 0)
+        ):
+            raise ValueError("walk-forward fold diagnostics are invalid")
+    scenarios = costs["scenarios"]
+    expected_scenarios = {str(float(value)) for value in config.cost_multipliers}
+    if not isinstance(scenarios, dict) or set(scenarios) != expected_scenarios:
+        raise ValueError("cost-sensitivity scenarios are invalid")
+    for scenario in scenarios.values():
+        if (
+            not isinstance(scenario, dict)
+            or set(scenario) != {"metrics", "folds"}
+            or not isinstance(scenario["metrics"], dict)
+            or "total_return" not in scenario["metrics"]
+            or not isinstance(scenario["folds"], list)
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"fold_id", "metrics", "constraints"}
+                or not isinstance(item["metrics"], dict)
+                or not isinstance(item["constraints"], dict)
+                for item in scenario["folds"]
+            )
+            or [item.get("fold_id") for item in scenario["folds"]]
+            != [fold.fold_id for fold in expected_folds]
+        ):
+            raise ValueError("cost-sensitivity diagnostics are invalid")
+    if not isinstance(exposure["industry"], dict) or set(exposure["industry"]) != {
+        "joined_rows",
+        "original_joined_rows",
+        "original_rank_ic",
+        "neutral_rank_ic",
+        "abs_rank_ic_retention",
+        "minimum_group_size",
+        "by_industry",
+        "mean_score_dispersion",
+    }:
+        raise ValueError("exposure diagnostics are invalid")
+    if not isinstance(exposure["size"], dict) or set(exposure["size"]) != {
+        "joined_rows",
+        "correlation",
+        "risk_threshold",
+        "risk_flag",
+        "uses",
+        "method",
+        "daily",
+        "yearly",
+    }:
+        raise ValueError("exposure diagnostics are invalid")
+    if not isinstance(exposure["missing"], dict) or set(exposure["missing"]) != {
+        "size_rows",
+        "industry_rows",
+    }:
+        raise ValueError("exposure diagnostics are invalid")
+    derived = evaluate_gates(folds, costs, exposure, config)
+    if (
+        walk["gates"] != derived
+        or walk["passed"] is not all(derived.values())
+        or not all(derived.values())
+    ):
+        raise PermissionError("robustness gate has not passed for this freeze")
+    markdown = freeze_dir / "robustness_report.md"
+    if markdown.read_bytes() != _markdown(walk, exposure):
+        raise ValueError("robustness Markdown is not derived from bound reports")
+    return derived
+
+
+def _execution_bundle(repo_root: Path, freeze: dict[str, Any]) -> dict[str, Any]:
+    config_root = repo_root / "config"
+    config = {
+        f"config/{name}": _sha256(
+            _required_regular_file(config_root / name, config_root)
+        )
+        for name in _EXECUTION_CONFIGS
+    }
+    factor = freeze["factor"]
+    paths = [
+        *_EXECUTION_MODULES,
+        str(factor["source_path"]),
+        str(factor["metadata_path"]),
+    ]
+    candidate_dir = repo_root / "src/alpha_lab/factors/candidates"
+    paths.extend(
+        path.relative_to(repo_root).as_posix()
+        for path in candidate_dir.glob("F[0-9][0-9][0-9][0-9].*")
+        if path.suffix in {".py", ".yaml"}
+    )
+    code = {
+        name: _sha256(_required_regular_file(repo_root / name, repo_root))
+        for name in sorted(set(paths))
+    }
+    return {"configs": config, "code": code}
+
+
+def _validate_execution_bundle_schema(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != {"configs", "code"}:
+        raise ValueError("test request execution bundle is invalid")
+    for section in ("configs", "code"):
+        items = value[section]
+        if (
+            not isinstance(items, dict)
+            or not items
+            or any(
+                not isinstance(path, str) or not _sha(sha)
+                for path, sha in items.items()
+            )
+        ):
+            raise ValueError("test request execution bundle is invalid")
+
+
+def validate_execution_bundle_files(
+    request: dict[str, Any], repo_root: Path
+) -> None:
+    bundle = request["execution_bundle"]
+    _validate_execution_bundle_schema(bundle)
+    expected_configs = {f"config/{name}" for name in _EXECUTION_CONFIGS}
+    if set(bundle["configs"]) != expected_configs:
+        raise ValueError("test request execution config bundle is incomplete")
+    if not set(_EXECUTION_MODULES).issubset(bundle["code"]):
+        raise ValueError("test request execution code bundle is incomplete")
+    for section in ("configs", "code"):
+        for relative, expected_sha256 in bundle[section].items():
+            path = _required_regular_file(repo_root / relative, repo_root)
+            if _sha256(path) != expected_sha256:
+                raise ValueError(f"test request execution bundle drift: {relative}")
+
+
+def _register_test_request(
+    database_path: Path,
+    freeze: dict[str, Any],
+    request: dict[str, Any],
+    request_path: Path,
+) -> None:
+    factor = freeze["factor"]
+    repo_root = request_path.parents[3]
+    metadata = FactorMetadata.model_validate(
+        yaml.safe_load((repo_root / factor["metadata_path"]).read_text(encoding="utf-8"))
+    )
+    version_id = f"{factor['factor_id']}-{str(factor['source_sha256'])[:20]}"
+    with catalog._catalog_write_lock(database_path):
+        catalog.initialize_database(database_path)
+        with duckdb.connect(str(database_path)) as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO research.factor_definition
+                        (factor_id, name, family, description)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT (factor_id) DO NOTHING
+                    """,
+                    [
+                        factor["factor_id"],
+                        metadata.name,
+                        metadata.family,
+                        metadata.hypothesis,
+                    ],
+                )
+                connection.execute(
+                    """
+                    INSERT INTO research.factor_version
+                        (factor_version_id, factor_id, formula,
+                         implementation_path, code_sha256, metadata_sha256,
+                         lookback, direction)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (factor_version_id) DO NOTHING
+                    """,
+                    [
+                        version_id,
+                        factor["factor_id"],
+                        metadata.formula,
+                        factor["source_path"],
+                        factor["source_sha256"],
+                        factor["metadata_sha256"],
+                        metadata.lookback,
+                        metadata.direction,
+                    ],
+                )
+                version_rows = connection.execute(
+                    """
+                    SELECT factor_id, formula, implementation_path,
+                           code_sha256, metadata_sha256, lookback, direction
+                    FROM research.factor_version WHERE factor_version_id = ?
+                    """,
+                    [version_id],
+                ).fetchall()
+                expected_version = (
+                    factor["factor_id"],
+                    metadata.formula,
+                    factor["source_path"],
+                    factor["source_sha256"],
+                    factor["metadata_sha256"],
+                    metadata.lookback,
+                    metadata.direction,
+                )
+                if len(version_rows) != 1 or tuple(version_rows[0]) != expected_version:
+                    raise RuntimeError("factor version catalog registration conflict")
+                manifest_artifact_id = hashlib.sha256(
+                    f"freeze|{freeze['freeze_id']}|{request['freeze_sha256']}".encode()
+                ).hexdigest()
+                connection.execute(
+                    """
+                    INSERT INTO research.factor_freeze
+                        (freeze_id, freeze_sha256, factor_version_id,
+                         phase5_snapshot_id, exposure_snapshot_id,
+                         robustness_policy_sha256, cost_policy_sha256,
+                         code_commit, test_start, test_end, manifest_artifact_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS DATE),
+                            CAST(? AS DATE), ?)
+                    ON CONFLICT (freeze_id) DO NOTHING
+                    """,
+                    [
+                        freeze["freeze_id"],
+                        request["freeze_sha256"],
+                        version_id,
+                        freeze["snapshots"]["phase5"]["snapshot_id"],
+                        freeze["snapshots"]["exposure"]["snapshot_id"],
+                        freeze["policies"]["robustness"]["sha256"],
+                        freeze["policies"]["costs"]["sha256"],
+                        freeze["git_commit"],
+                        request["locked_test"]["start"],
+                        request["locked_test"]["end"],
+                        manifest_artifact_id,
+                    ],
+                )
+                freeze_rows = connection.execute(
+                    """
+                    SELECT freeze_sha256, factor_version_id,
+                           phase5_snapshot_id, exposure_snapshot_id,
+                           robustness_policy_sha256, cost_policy_sha256,
+                           code_commit, CAST(test_start AS VARCHAR),
+                           CAST(test_end AS VARCHAR), status
+                    FROM research.factor_freeze WHERE freeze_id = ?
+                    """,
+                    [freeze["freeze_id"]],
+                ).fetchall()
+                expected_freeze = (
+                    request["freeze_sha256"],
+                    version_id,
+                    freeze["snapshots"]["phase5"]["snapshot_id"],
+                    freeze["snapshots"]["exposure"]["snapshot_id"],
+                    freeze["policies"]["robustness"]["sha256"],
+                    freeze["policies"]["costs"]["sha256"],
+                    freeze["git_commit"],
+                    request["locked_test"]["start"],
+                    request["locked_test"]["end"],
+                    "frozen",
+                )
+                if len(freeze_rows) != 1 or tuple(freeze_rows[0]) != expected_freeze:
+                    raise RuntimeError("factor freeze catalog registration conflict")
+                connection.execute(
+                    """
+                    INSERT INTO research.test_request
+                        (request_id, request_sha256, freeze_id, freeze_sha256,
+                         robustness_report_sha256, test_start, test_end)
+                    VALUES (?, ?, ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE))
+                    ON CONFLICT (request_id) DO NOTHING
+                    """,
+                    [
+                        request["request_id"],
+                        _sha256(request_path),
+                        request["freeze_id"],
+                        request["freeze_sha256"],
+                        request["robustness_artifacts"]["robustness_report.md"]["sha256"],
+                        request["locked_test"]["start"],
+                        request["locked_test"]["end"],
+                    ],
+                )
+                _require_registered_request(connection, request, request_path)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+
+def _register_test_approval(
+    database_path: Path,
+    request: dict[str, Any],
+    approval: dict[str, Any],
+    approval_path: Path,
+) -> None:
+    with catalog._catalog_write_lock(database_path):
+        catalog.initialize_database(database_path)
+        with duckdb.connect(str(database_path)) as connection:
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO research.test_approval
+                        (approval_id, approval_sha256, request_id, freeze_id,
+                         confirmed_freeze_sha256, test_start, test_end,
+                         approver, approved_at)
+                    VALUES (?, ?, ?, ?, ?, CAST(? AS DATE), CAST(? AS DATE),
+                            ?, CAST(? AS TIMESTAMPTZ))
+                    ON CONFLICT (approval_id) DO NOTHING
+                    """,
+                    [
+                        approval["approval_id"],
+                        _sha256(approval_path),
+                        request["request_id"],
+                        request["freeze_id"],
+                        request["freeze_sha256"],
+                        request["locked_test"]["start"],
+                        request["locked_test"]["end"],
+                        approval["approver"],
+                        approval["approved_at"],
+                    ],
+                )
+                row = connection.execute(
+                    """
+                    SELECT approval_sha256, request_id, freeze_id,
+                           confirmed_freeze_sha256,
+                           CAST(test_start AS VARCHAR), CAST(test_end AS VARCHAR),
+                           approver, status
+                    FROM research.test_approval WHERE approval_id = ?
+                    """,
+                    [approval["approval_id"]],
+                ).fetchall()
+                expected = (
+                    _sha256(approval_path),
+                    request["request_id"],
+                    request["freeze_id"],
+                    request["freeze_sha256"],
+                    request["locked_test"]["start"],
+                    request["locked_test"]["end"],
+                    approval["approver"],
+                    "approved",
+                )
+                if len(row) != 1 or tuple(row[0]) != expected:
+                    raise RuntimeError("test approval catalog registration conflict")
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+
+def _require_registered_request(
+    connection: duckdb.DuckDBPyConnection,
+    request: dict[str, Any],
+    request_path: Path,
+) -> None:
+    row = connection.execute(
+        """
+        SELECT request_sha256, freeze_id, freeze_sha256,
+               robustness_report_sha256, CAST(test_start AS VARCHAR),
+               CAST(test_end AS VARCHAR), status
+        FROM research.test_request WHERE request_id = ?
+        """,
+        [request["request_id"]],
+    ).fetchall()
+    expected = (
+        _sha256(request_path),
+        request["freeze_id"],
+        request["freeze_sha256"],
+        request["robustness_artifacts"]["robustness_report.md"]["sha256"],
+        request["locked_test"]["start"],
+        request["locked_test"]["end"],
+        "test_requested",
+    )
+    if len(row) != 1 or tuple(row[0]) != expected:
+        raise RuntimeError("test request catalog registration conflict")
 
 
 def _validate_approver(value: object) -> None:
