@@ -291,7 +291,7 @@ def test_historical_taxonomy_bridge_rejects_conflicting_paths() -> None:
         )
 
 
-def test_historical_taxonomy_bridge_rejects_l1_absent_from_sw2021() -> None:
+def test_historical_taxonomy_bridge_rejects_used_l1_absent_from_sw2021() -> None:
     definitions = normalize_industry_definition(_definition_raw())
     l1 = pd.DataFrame(
         [["801999.SI", "x", "L1", "230000", "SW2014"]],
@@ -306,8 +306,15 @@ def test_historical_taxonomy_bridge_rejects_l1_absent_from_sw2021() -> None:
         columns=INDEX_CLASSIFY_L3_FIELDS,
     )
 
+    bridge = normalize_historical_taxonomy_bridge(l1, l2, l3, definitions)
     with pytest.raises(ValueError, match="absent from SW2021"):
-        normalize_historical_taxonomy_bridge(l1, l2, l3, definitions)
+        normalize_industry_membership_backfill(
+            _membership_raw().assign(l1_code="", l2_code="230100", l3_code="850412.SI"),
+            {},
+            {"801010.SI"},
+            expected_ts_code="600000.SH",
+            historical_bridge=bridge,
+        )
 
 
 def test_membership_backfill_fails_closed_for_empty_security_response() -> None:

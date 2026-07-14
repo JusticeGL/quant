@@ -21,6 +21,10 @@ gates. This work does not authorize freeze, approval, or final-test access.
   the number of bridged membership intervals in quality evidence.
 - Keeps every existing observation coverage, duplicate, overlap,
   unknown-reference, and market-cap gate unchanged.
+- Validates SW2021 stability for the historical L1 targets actually selected by
+  membership paths. Unused SW2014 L1 categories may legitimately have no
+  SW2021 successor and do not block unrelated mappings; a used missing target
+  still fails closed.
 
 ## Verification
 
@@ -28,7 +32,7 @@ gates. This work does not authorize freeze, approval, or final-test access.
   conflicting paths, unstable L1 targets, acquisition, snapshot and freeze:
   `133 passed`.
 
-- `make test`: `390 passed in 72.14s`.
+- Final `make test` after the used-target refinement: `390 passed in 41.51s`.
 - `make lint`: Ruff and formatting passed; mypy passed for 68 source files.
 - `make smoke`: Linux aarch64, Python 3.11.15; qlib 0.9.7, akshare
   1.18.64, duckdb 1.5.4, pyarrow 24.0.0 and lightgbm 4.6.0 imported.

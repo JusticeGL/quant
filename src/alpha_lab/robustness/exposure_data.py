@@ -230,7 +230,6 @@ def normalize_historical_taxonomy_bridge(
     stable_targets = definitions["source_index_code"].astype(str)
     if stable_targets.duplicated().any():
         raise ValueError("SW2021 stable L1 index code is ambiguous")
-    target_codes = set(stable_targets)
     l1_by_industry = dict(
         zip(
             levels["L1"]["industry_code"],
@@ -238,9 +237,6 @@ def normalize_historical_taxonomy_bridge(
             strict=True,
         )
     )
-    unstable = sorted(set(l1_by_industry.values()) - target_codes)
-    if unstable:
-        raise ValueError(f"historical L1 is absent from SW2021 definitions: {unstable}")
     l2_to_l1: dict[str, str] = {}
     for row in levels["L2"].itertuples(index=False):
         stable_l1 = l1_by_industry.get(str(row.parent_code))
@@ -377,6 +373,14 @@ def normalize_industry_membership_backfill(
     if mapped.isna().any():
         missing = sorted(set(l2_codes.astype("string")[mapped.isna()].dropna()))
         raise ValueError(f"index_member_all backfill has unmapped L2 code: {missing}")
+    invalid_historical_target = source_version.eq("SW2014") & ~mapped.isin(
+        allowed_l1_codes
+    )
+    if invalid_historical_target.any():
+        unstable = sorted(set(mapped[invalid_historical_target].astype(str)))
+        raise ValueError(
+            f"used historical L1 is absent from SW2021 definitions: {unstable}"
+        )
     supplied = raw["l1_code"].replace("", pd.NA).astype("string")
     conflicts = supplied.notna() & supplied.ne(mapped.astype("string"))
     if conflicts.any():
