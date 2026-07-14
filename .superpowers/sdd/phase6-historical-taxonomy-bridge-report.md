@@ -37,5 +37,24 @@ gates. This work does not authorize freeze, approval, or final-test access.
 - `make smoke`: Linux aarch64, Python 3.11.15; qlib 0.9.7, akshare
   1.18.64, duckdb 1.5.4, pyarrow 24.0.0 and lightgbm 4.6.0 imported.
 
-Real-cache bootstrap and its idempotent replay are recorded after the
-implementation commit.
+## Real-cache bootstrap
+
+Bootstrap was run after commits `737df9b` and `fb7932c` with the required
+Compose overlay and local environment file. The historical taxonomy chain now
+validates and contributes 30 bridged membership intervals. Publication then
+stops at the unchanged industry-observation gate:
+
+- expected Phase 5 observations: 473,103;
+- point-in-time industry matches: 445,199;
+- missing industry observations: 27,904;
+- actual coverage: 94.1019186097%;
+- required coverage: 98%;
+- securities with one or more missing observations: 74;
+- securities with no membership interval: 10.
+
+This is a new coverage blocker, not a taxonomy-mapping error. No `p6x-*`
+snapshot was published, so an idempotent second publication was not applicable.
+Raw cache was preserved and the workflow did not continue to freeze, approval,
+or final test. Filling historical interval gaps for securities that have some
+membership would expand acquisition semantics and requires a separate policy
+decision; it was not inferred here.
