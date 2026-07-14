@@ -77,7 +77,12 @@ def materialize_exposure_snapshot(
     expected_security_ids = set(
         phase5_context["observations"]["security_id"].astype(str)
     )
-    expected_industry_ids = set(tables.industry_definition["industry_id"].astype(str))
+    expected_industry_ids = set(
+        tables.industry_membership.attrs.get(
+            "expected_industry_ids",
+            tables.industry_definition["industry_id"].astype(str).tolist(),
+        )
+    )
     quality = validate_exposure_tables(
         tables,
         known_security_ids,

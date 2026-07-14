@@ -15,12 +15,15 @@ from alpha_lab.robustness.contracts import ExposureTables
 from alpha_lab.robustness.exposure_data import (
     DAILY_BASIC_FIELDS,
     INDEX_CLASSIFY_FIELDS,
+    INDEX_CLASSIFY_L2_FIELDS,
     INDUSTRY_MEMBER_FIELDS,
     _load_phase5_tables,
     acquire_exposure_tables,
     industry_as_of,
     normalize_industry_definition,
+    normalize_industry_l2_mapping,
     normalize_industry_membership,
+    normalize_industry_membership_backfill,
     normalize_market_cap,
     probe_exposure_capabilities,
     validate_exposure_tables,
@@ -155,6 +158,73 @@ def test_membership_rejects_empty_requested_industry_response() -> None:
             empty,
             {"801010.SI"},
             expected_l1_code="801010.SI",
+        )
+
+
+def test_l2_mapping_recovers_blank_l1_and_rejects_conflicts() -> None:
+    definitions = normalize_industry_definition(_definition_raw())
+    l2 = pd.DataFrame(
+        [["801011.SI", "种植业", "L2", "110100", "110000", "SW2021"]],
+        columns=INDEX_CLASSIFY_L2_FIELDS,
+    )
+    mapping = normalize_industry_l2_mapping(l2, definitions)
+    blank_l1 = _membership_raw().assign(l1_code="", l1_name="", l2_code="110100")
+
+    recovered = normalize_industry_membership_backfill(
+        blank_l1, mapping, {"801010.SI"}, expected_ts_code="600000.SH"
+    )
+
+    assert recovered["industry_id"].tolist() == ["CN:SW2021:801010.SI"]
+    with pytest.raises(ValueError, match="conflicts with audited L2 parent"):
+        normalize_industry_membership_backfill(
+            blank_l1.assign(l1_code="801020.SI"),
+            mapping,
+            {"801010.SI", "801020.SI"},
+            expected_ts_code="600000.SH",
+        )
+
+
+def test_l2_mapping_fails_closed_for_missing_or_ambiguous_parent() -> None:
+    definitions = normalize_industry_definition(_definition_raw())
+    missing = pd.DataFrame(
+        [["801011.SI", "种植业", "L2", "110100", "999999", "SW2021"]],
+        columns=INDEX_CLASSIFY_L2_FIELDS,
+    )
+    with pytest.raises(ValueError, match="unknown L1 parent"):
+        normalize_industry_l2_mapping(missing, definitions)
+    ambiguous = pd.concat(
+        [
+            missing.assign(parent_code="110000"),
+            missing.assign(index_code="801012.SI", parent_code="120000"),
+        ],
+        ignore_index=True,
+    )
+    definitions = pd.concat(
+        [
+            definitions,
+            definitions.assign(
+                industry_id="CN:SW2021:801020.SI",
+                source_index_code="801020.SI",
+                industry_code="120000",
+            ),
+        ],
+        ignore_index=True,
+    )
+    with pytest.raises(ValueError, match="ambiguous L2"):
+        normalize_industry_l2_mapping(ambiguous, definitions)
+    with pytest.raises(ValueError, match="ambiguous L2"):
+        normalize_industry_l2_mapping(
+            pd.concat([missing.assign(parent_code="110000")] * 2), definitions
+        )
+
+
+def test_membership_backfill_fails_closed_for_empty_security_response() -> None:
+    with pytest.raises(ValueError, match="empty backfill response for 000413.SZ"):
+        normalize_industry_membership_backfill(
+            pd.DataFrame(columns=INDUSTRY_MEMBER_FIELDS),
+            {"110100": "801010.SI"},
+            {"801010.SI"},
+            expected_ts_code="000413.SZ",
         )
 
 
@@ -445,29 +515,58 @@ def test_acquisition_rejects_one_row_per_entity_over_long_horizon(
         acquire_exposure_tables(tmp_path, config, provider)
 
 
-@pytest.mark.parametrize(
-    ("empty_security", "empty_industry", "message"),
-    [
-        ("600001.SH", None, "empty response for 600001.SH"),
-        (None, "801020.SI", "empty response for 801020.SI"),
-    ],
-)
 def test_acquisition_does_not_mask_an_empty_requested_response(
     tmp_path: Path,
-    empty_security: str | None,
-    empty_industry: str | None,
-    message: str,
 ) -> None:
     _phase5_provider_fixture(tmp_path, security_ids=["CN:SSE:600000", "CN:SSE:600001"])
     config, _ = load_robustness_config(ROOT / "config" / "robustness.yaml")
     provider = _AcquisitionFakeProvider(
         tmp_path,
-        empty_security=empty_security,
-        empty_industry=empty_industry,
+        empty_security="600001.SH",
     )
 
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match="empty response for 600001.SH"):
         acquire_exposure_tables(tmp_path, config, provider)
+
+
+def test_acquisition_backfills_empty_l1_by_ts_code_via_audited_l2_parent(
+    tmp_path: Path,
+) -> None:
+    _phase5_provider_fixture(tmp_path, security_ids=["CN:SSE:600000", "CN:SSE:600001"])
+    config, _ = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    provider = _AcquisitionFakeProvider(tmp_path, empty_industry="801020.SI")
+
+    tables, artifacts = acquire_exposure_tables(tmp_path, config, provider)
+
+    assert set(tables.industry_membership["security_id"]) == {
+        "CN:SSE:600000",
+        "CN:SSE:600001",
+    }
+    recovered = tables.industry_membership.loc[
+        tables.industry_membership["security_id"].eq("CN:SSE:600001")
+    ]
+    assert recovered["industry_id"].tolist() == ["CN:SW2021:801020.SI"]
+    assert tables.industry_membership.attrs["explicit_empty_industry_ids"] == [
+        "CN:SW2021:801020.SI"
+    ]
+    assert len(artifacts) == 8
+    assert any(
+        call[0] == "index_classify"
+        and call[1] == {"level": "L2", "src": "SW2021"}
+        and call[2] == INDEX_CLASSIFY_L2_FIELDS
+        for call in provider.calls
+    )
+    assert any(
+        call[0] == "index_member_all" and call[1] == {"ts_code": "600001.SH"}
+        for call in provider.calls
+    )
+    quality = validate_exposure_tables(tables, {"CN:SSE:600000", "CN:SSE:600001"})
+    assert quality["status"] == "pass"
+    assert quality["checks"]["explicit_empty_industry_definition"] == {
+        "severity": "info",
+        "status": "pass",
+        "count": 1,
+    }
 
 
 def _definition_raw() -> pd.DataFrame:
@@ -658,6 +757,14 @@ class _AcquisitionFakeProvider:
 
     def _frame(self, api_name: str, params: dict[str, object]) -> pd.DataFrame:
         if api_name == "index_classify":
+            if params.get("level") == "L2":
+                return pd.DataFrame(
+                    [
+                        ["801011.SI", "种植业", "L2", "110100", "110000", "SW2021"],
+                        ["801021.SI", "煤炭", "L2", "120100", "120000", "SW2021"],
+                    ],
+                    columns=INDEX_CLASSIFY_L2_FIELDS,
+                )
             return pd.concat(
                 [
                     _definition_raw(),
@@ -670,12 +777,20 @@ class _AcquisitionFakeProvider:
                 ignore_index=True,
             )
         if api_name == "index_member_all":
-            l1_code = str(params["l1_code"])
-            if l1_code == self.empty_industry:
-                return pd.DataFrame(columns=INDUSTRY_MEMBER_FIELDS)
+            if "l1_code" in params:
+                l1_code = str(params["l1_code"])
+                if l1_code == self.empty_industry:
+                    return pd.DataFrame(columns=INDUSTRY_MEMBER_FIELDS)
+                return _membership_raw().assign(
+                    l1_code=l1_code,
+                    ts_code=("600000.SH" if l1_code == "801010.SI" else "600001.SH"),
+                )
+            ts_code = str(params["ts_code"])
             return _membership_raw().assign(
-                l1_code=l1_code,
-                ts_code=("600000.SH" if l1_code == "801010.SI" else "600001.SH"),
+                l1_code="",
+                l1_name="",
+                l2_code=("110100" if ts_code == "600000.SH" else "120100"),
+                ts_code=ts_code,
             )
         if api_name == "daily_basic":
             if (

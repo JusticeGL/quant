@@ -29,6 +29,14 @@ INDEX_CLASSIFY_FIELDS = (
     "industry_code",
     "src",
 )
+INDEX_CLASSIFY_L2_FIELDS = (
+    "index_code",
+    "industry_name",
+    "level",
+    "industry_code",
+    "parent_code",
+    "src",
+)
 INDUSTRY_MEMBER_FIELDS = (
     "l1_code",
     "l1_name",
@@ -136,16 +144,59 @@ def normalize_industry_definition(raw: pd.DataFrame) -> pd.DataFrame:
     return result.sort_values("industry_id", kind="stable").reset_index(drop=True)
 
 
+def normalize_industry_l2_mapping(
+    raw: pd.DataFrame, definitions: pd.DataFrame
+) -> dict[str, str]:
+    _require_fields(raw, INDEX_CLASSIFY_L2_FIELDS, "index_classify L2")
+    selected = raw.loc[
+        raw["src"].astype("string").eq("SW2021")
+        & raw["level"].astype("string").str.upper().eq("L2")
+    ].copy()
+    if selected.empty:
+        raise ValueError("index_classify returned no SW2021 level-two industries")
+    required = selected[["index_code", "industry_code", "parent_code"]].replace(
+        "", pd.NA
+    )
+    if required.isna().any().any():
+        raise ValueError("index_classify L2 contains missing hierarchy fields")
+    l1 = definitions[["industry_code", "source_index_code"]].replace("", pd.NA)
+    if l1.isna().any().any() or l1["industry_code"].duplicated().any():
+        raise ValueError("SW2021 L1 industry_code hierarchy is incomplete or ambiguous")
+    parent_to_l1 = dict(
+        zip(
+            l1["industry_code"].astype(str),
+            l1["source_index_code"].astype(str),
+            strict=True,
+        )
+    )
+    unknown = sorted(set(required["parent_code"].astype(str)) - set(parent_to_l1))
+    if unknown:
+        raise ValueError(f"index_classify L2 contains unknown L1 parent: {unknown}")
+    pairs = pd.DataFrame(
+        {
+            "l2_code": required["industry_code"].astype(str),
+            "l1_code": required["parent_code"].astype(str).map(parent_to_l1),
+        }
+    )
+    if (
+        required["index_code"].astype(str).duplicated().any()
+        or pairs["l2_code"].duplicated().any()
+    ):
+        raise ValueError("index_classify contains ambiguous L2 parent mapping")
+    return dict(zip(pairs["l2_code"], pairs["l1_code"], strict=True))
+
+
 def normalize_industry_membership(
     raw: pd.DataFrame,
     allowed_l1_codes: set[str],
     *,
     row_limit: int = INDUSTRY_MEMBER_ROW_LIMIT,
     expected_l1_code: str | None = None,
+    allow_empty_expected_l1: bool = False,
 ) -> pd.DataFrame:
     _require_fields(raw, INDUSTRY_MEMBER_FIELDS, "index_member_all")
     _reject_row_limit(raw, row_limit, "index_member_all")
-    if expected_l1_code is not None and raw.empty:
+    if expected_l1_code is not None and raw.empty and not allow_empty_expected_l1:
         raise ValueError(
             f"index_member_all returned empty response for {expected_l1_code}"
         )
@@ -188,6 +239,41 @@ def normalize_industry_membership(
     return result.sort_values(
         ["security_id", "effective_from", "industry_id"], kind="stable"
     ).reset_index(drop=True)
+
+
+def normalize_industry_membership_backfill(
+    raw: pd.DataFrame,
+    l2_to_l1: Mapping[str, str],
+    allowed_l1_codes: set[str],
+    *,
+    expected_ts_code: str,
+    row_limit: int = INDUSTRY_MEMBER_ROW_LIMIT,
+) -> pd.DataFrame:
+    _require_fields(raw, INDUSTRY_MEMBER_FIELDS, "index_member_all ts_code backfill")
+    _reject_row_limit(raw, row_limit, "index_member_all ts_code backfill")
+    if raw.empty:
+        raise ValueError(
+            f"index_member_all returned empty backfill response for {expected_ts_code}"
+        )
+    ts_codes = raw["ts_code"].replace("", pd.NA)
+    if ts_codes.isna().any() or not ts_codes.astype(str).eq(expected_ts_code).all():
+        raise ValueError(
+            "index_member_all backfill contains an unexpected or empty security"
+        )
+    l2_codes = raw["l2_code"].replace("", pd.NA)
+    if l2_codes.isna().any():
+        raise ValueError("index_member_all backfill contains missing L2 code")
+    mapped = l2_codes.astype(str).map(l2_to_l1)
+    if mapped.isna().any():
+        missing = sorted(set(l2_codes.astype(str)[mapped.isna()]))
+        raise ValueError(f"index_member_all backfill has unmapped L2 code: {missing}")
+    supplied = raw["l1_code"].replace("", pd.NA).astype("string")
+    conflicts = supplied.notna() & supplied.ne(mapped.astype("string"))
+    if conflicts.any():
+        raise ValueError("index_member_all L1 conflicts with audited L2 parent mapping")
+    recovered = raw.copy()
+    recovered["l1_code"] = mapped
+    return normalize_industry_membership(recovered, allowed_l1_codes)
 
 
 def industry_as_of(intervals: pd.DataFrame, as_of: date) -> pd.DataFrame:
@@ -280,8 +366,17 @@ def validate_exposure_tables(
         out_of_scope_market_cap += int((market_dates.dt.date > market_end_date).sum())
     observed_security_ids = set(tables.market_cap.get("security_id", []))
     observed_industry_ids = set(tables.industry_membership.get("industry_id", []))
+    observed_membership_security_ids = set(
+        tables.industry_membership.get("security_id", [])
+    )
     missing_security_coverage = len(expected_security_ids - observed_security_ids)
+    missing_membership_security_coverage = len(
+        expected_security_ids - observed_membership_security_ids
+    )
     missing_industry_coverage = len(expected_industry_ids - observed_industry_ids)
+    explicit_empty_industry_ids = set(
+        tables.industry_membership.attrs.get("explicit_empty_industry_ids", [])
+    )
     expected_keys = _observation_keys(expected_market_observations)
     observed_keys = _observation_keys(tables.market_cap)
     covered_keys = expected_keys & observed_keys
@@ -328,14 +423,28 @@ def validate_exposure_tables(
         "unknown_industry_reference": _quality_check(unknown_industry),
         "invalid_market_cap": _quality_check(invalid_cap),
         "missing_security_coverage": _quality_check(missing_security_coverage),
+        "missing_membership_security_coverage": _quality_check(
+            missing_membership_security_coverage
+        ),
         "missing_industry_coverage": _quality_check(missing_industry_coverage),
+        "explicit_empty_industry_definition": {
+            "severity": "info",
+            "status": "pass",
+            "count": len(explicit_empty_industry_ids),
+        },
         "insufficient_temporal_coverage": _quality_check(
             insufficient_temporal_coverage
         ),
         "undercovered_security": _quality_check(undercovered_security),
         "market_cap_out_of_scope": _quality_check(out_of_scope_market_cap),
     }
-    status = "error" if any(item["count"] for item in checks.values()) else "pass"
+    status = (
+        "error"
+        if any(
+            item["count"] and item["severity"] == "error" for item in checks.values()
+        )
+        else "pass"
+    )
     return {
         "schema_version": 1,
         "policy": "phase6_exposure_quality_v1",
@@ -346,6 +455,7 @@ def validate_exposure_tables(
             "industry_membership_count": len(tables.industry_membership),
             "expected_security_count": len(expected_security_ids),
             "expected_industry_count": len(expected_industry_ids),
+            "explicit_empty_industry_count": len(explicit_empty_industry_ids),
             "expected_observation_count": expected_observation_count,
             "observed_observation_count": observed_observation_count,
             "temporal_coverage_ratio": round(temporal_coverage_ratio, 12),
@@ -377,6 +487,7 @@ def probe_exposure_capabilities(config_dir: Path, data_dir: Path) -> dict[str, o
         member.frame,
         set(normalized["source_index_code"].astype(str)),
         expected_l1_code=first_industry,
+        allow_empty_expected_l1=True,
     )
     first_date = sample_date.strftime("%Y%m%d")
     market = provider.query(
@@ -403,6 +514,7 @@ def probe_exposure_capabilities(config_dir: Path, data_dir: Path) -> dict[str, o
             "index_classify": {"row_count": len(definition.frame)},
             "index_member_all": {"row_count": len(member.frame)},
         },
+        "sample_industry_explicitly_empty": member.frame.empty,
     }
 
 
@@ -436,6 +548,7 @@ def acquire_exposure_tables(
         probe_member.frame,
         set(definitions["source_index_code"].astype(str)),
         expected_l1_code=first_code,
+        allow_empty_expected_l1=True,
     )
     probe_market = provider.query(
         config.exposure_source.endpoints.market_cap,
@@ -488,23 +601,78 @@ def acquire_exposure_tables(
         ],
         ignore_index=True,
     )
-    membership = pd.concat(
-        [
-            normalize_industry_membership(
-                item.frame,
-                set(industry_codes),
-                expected_l1_code=code,
-            )
-            for code, item in zip(industry_codes, member_results, strict=True)
-        ],
-        ignore_index=True,
-    )
     expected_security_ids = {to_security_id(code) for code in ts_codes}
-    expected_industry_ids = {f"CN:SW2021:{code}" for code in industry_codes}
+    explicit_empty_industry_ids = {
+        f"CN:SW2021:{code}"
+        for code, item in zip(industry_codes, member_results, strict=True)
+        if item.frame.empty
+    }
+    normalized_l1 = [
+        normalize_industry_membership(
+            item.frame,
+            set(industry_codes),
+            expected_l1_code=code,
+            allow_empty_expected_l1=True,
+        )
+        for code, item in zip(industry_codes, member_results, strict=True)
+    ]
+    membership = pd.concat(normalized_l1, ignore_index=True)
+    membership = membership.loc[
+        membership["security_id"].isin(expected_security_ids)
+    ].copy()
+    missing_ts_codes = sorted(
+        _security_id_to_ts_code(security_id)
+        for security_id in expected_security_ids - set(membership["security_id"])
+    )
+    hierarchy_result: TushareQueryResult | None = None
+    backfill_results: list[TushareQueryResult] = []
+    if missing_ts_codes:
+        hierarchy_result = provider.query(
+            config.exposure_source.endpoints.industry_classification,
+            {"level": "L2", "src": config.exposure_source.classification_standard},
+            INDEX_CLASSIFY_L2_FIELDS,
+        )
+        l2_to_l1 = normalize_industry_l2_mapping(hierarchy_result.frame, definitions)
+        backfill_workers = min(
+            config.exposure_source.maximum_concurrency, len(missing_ts_codes)
+        )
+        with ThreadPoolExecutor(max_workers=backfill_workers) as executor:
+            backfill_results = list(
+                executor.map(
+                    lambda code: provider.query(
+                        config.exposure_source.endpoints.industry_membership,
+                        {"ts_code": code},
+                        INDUSTRY_MEMBER_FIELDS,
+                    ),
+                    missing_ts_codes,
+                )
+            )
+        backfill = pd.concat(
+            [
+                normalize_industry_membership_backfill(
+                    item.frame,
+                    l2_to_l1,
+                    set(industry_codes),
+                    expected_ts_code=code,
+                )
+                for code, item in zip(missing_ts_codes, backfill_results, strict=True)
+            ],
+            ignore_index=True,
+        )
+        membership = pd.concat([membership, backfill], ignore_index=True)
+    membership = membership.sort_values(
+        ["security_id", "effective_from", "industry_id"], kind="stable"
+    ).reset_index(drop=True)
+    if membership.duplicated(["security_id", "industry_id", "effective_from"]).any():
+        raise ValueError("industry membership returned duplicate interval keys")
+    expected_industry_ids = set(membership["industry_id"])
     market.attrs["expected_security_ids"] = sorted(expected_security_ids)
     market.attrs["expected_market_observations"] = phase5["observations"]
     market.attrs["minimum_temporal_coverage"] = config.minimum_fold_coverage
     membership.attrs["expected_industry_ids"] = sorted(expected_industry_ids)
+    membership.attrs["explicit_empty_industry_ids"] = sorted(
+        explicit_empty_industry_ids
+    )
     if _interval_overlap_count(membership):
         raise ValueError("industry membership intervals overlap")
     tables = ExposureTables(market, definitions, membership)
@@ -520,9 +688,15 @@ def acquire_exposure_tables(
     )
     if quality["status"] == "error":
         raise ValueError("exposure acquisition coverage gates failed")
-    artifacts = _unique_artifacts(
-        [definition_result, probe_market, *market_results, *member_results]
-    )
+    artifact_results = [
+        definition_result,
+        probe_market,
+        *market_results,
+        *member_results,
+        *([hierarchy_result] if hierarchy_result is not None else []),
+        *backfill_results,
+    ]
+    artifacts = _unique_artifacts(artifact_results)
     return tables, artifacts
 
 

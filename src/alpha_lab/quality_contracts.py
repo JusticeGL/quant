@@ -14,18 +14,20 @@ _PHASE5_CHECK_SEVERITIES = {
     "missing_delist_date": "warning",
 }
 
-_EXPOSURE_CHECKS = {
-    "empty_required_table",
-    "duplicate_keys",
-    "industry_interval_overlap",
-    "unknown_security_reference",
-    "unknown_industry_reference",
-    "invalid_market_cap",
-    "missing_security_coverage",
-    "missing_industry_coverage",
-    "insufficient_temporal_coverage",
-    "undercovered_security",
-    "market_cap_out_of_scope",
+_EXPOSURE_CHECK_SEVERITIES = {
+    "empty_required_table": "error",
+    "duplicate_keys": "error",
+    "industry_interval_overlap": "error",
+    "unknown_security_reference": "error",
+    "unknown_industry_reference": "error",
+    "invalid_market_cap": "error",
+    "missing_security_coverage": "error",
+    "missing_membership_security_coverage": "error",
+    "missing_industry_coverage": "error",
+    "explicit_empty_industry_definition": "info",
+    "insufficient_temporal_coverage": "error",
+    "undercovered_security": "error",
+    "market_cap_out_of_scope": "error",
 }
 
 
@@ -135,14 +137,16 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
         return ["quality_schema"]
 
     checks = quality["checks"]
-    check_failure = set(checks) != _EXPOSURE_CHECKS
+    check_failure = set(checks) != set(_EXPOSURE_CHECK_SEVERITIES)
     counts: list[int] = []
     if not check_failure:
-        for item in checks.values():
-            if not _valid_check(item, "error"):
+        for name, item in checks.items():
+            severity = _EXPOSURE_CHECK_SEVERITIES[name]
+            if not _valid_check(item, severity, allow_positive=severity == "info"):
                 check_failure = True
                 break
-            counts.append(item["count"])
+            if severity == "error":
+                counts.append(item["count"])
     failures = ["quality_checks"] if check_failure else []
     derived_status = "error" if any(counts) or check_failure else "pass"
     if (
@@ -197,6 +201,7 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
             *count_keys,
             "temporal_coverage_ratio",
             "minimum_temporal_coverage",
+            "explicit_empty_industry_count",
         }
         or any(
             summary.get(key) != value for key, value in expected_summary_counts.items()
@@ -205,8 +210,12 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
         or not _unit_number(summary.get("temporal_coverage_ratio"))
         or not _unit_number(summary.get("minimum_temporal_coverage"))
         or summary.get("minimum_temporal_coverage") != coverage_minimum
-        or expected_industry_count
-        != expected_summary_counts["industry_definition_count"]
+        or (
+            _nonnegative_int(expected_industry_count)
+            and expected_industry_count
+            > expected_summary_counts["industry_definition_count"]
+        )
+        or not _nonnegative_int(summary.get("explicit_empty_industry_count"))
         or observed_observations != expected_summary_counts["market_cap_count"]
         or summary.get("observed_observation_count", 0)
         > summary.get("expected_observation_count", 0)
@@ -223,14 +232,14 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
     return failures
 
 
-def _valid_check(value: object, severity: str) -> bool:
+def _valid_check(value: object, severity: str, *, allow_positive: bool = False) -> bool:
     if not isinstance(value, dict) or set(value) != {"severity", "status", "count"}:
         return False
     count = value.get("count")
     return (
         value.get("severity") == severity
         and _nonnegative_int(count)
-        and value.get("status") == ("pass" if count == 0 else "fail")
+        and value.get("status") == ("pass" if allow_positive or count == 0 else "fail")
     )
 
 
