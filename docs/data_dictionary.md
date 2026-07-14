@@ -88,6 +88,11 @@ SHA256。
 2025-12-31。快照验证器从完整工件重新派生并比较内容及确定性 Parquet 字节；
 预测试路径不得打开完整工件。
 
+`manifests/<p6x-id>/pretest_capability.json` 是 Phase 6 预测试唯一的数据访问
+能力清单。它绑定固定截止日、Phase 5 父快照身份、策略哈希，以及允许打开的
+安全 artifact 哈希和行数；不含完整行业成员、完整质量报告、raw cache 或
+2026 统计。p6x 根 manifest 的 `pretest_capability` 引用参与根身份计算。
+
 Catalog 同步在 Task 2 验证后记录 manifest SHA256，并在 DuckDB 写锁与
 事务内重读 manifest、比较 SHA256，然后对 market-cap、raw、quality、
 industry 与必需 Phase 5 依赖的当前文件字节逐一重算 SHA256。登记的

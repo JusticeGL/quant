@@ -15,6 +15,7 @@ import yaml
 from alpha_lab.research_data.config import load_research_data_config
 from alpha_lab.robustness import freeze
 from alpha_lab.robustness.freeze import freeze_candidate, validate_freeze
+from alpha_lab.robustness.pretest_capability import build_pretest_capability
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -182,6 +183,127 @@ def test_freeze_is_byte_identical_on_repeat(freeze_fixture: dict[str, Path]) -> 
     assert second.freeze_path.read_bytes() == original
 
 
+@pytest.mark.parametrize("operation", ["create", "validate"])
+def test_pretest_freeze_never_opens_full_or_locked_dependencies(
+    freeze_fixture: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    frozen = None
+    if operation == "validate":
+        frozen = freeze_candidate(
+            "F1002",
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+            freeze_fixture["experiments"],
+        )
+    forbidden = {
+        freeze_fixture["phase5_manifest"].parent / "quality_report.json",
+        freeze_fixture["exposure_manifest"].parent / "quality_report.json",
+    }
+    exposure = json.loads(
+        freeze_fixture["exposure_manifest"].read_text(encoding="utf-8")
+    )
+    forbidden.add(
+        freeze_fixture["data"]
+        / next(
+            item["path"]
+            for item in exposure["artifacts"]
+            if item["name"] == "industry_membership.parquet"
+        )
+    )
+    real_read_bytes = Path.read_bytes
+
+    def guarded(path: Path) -> bytes:
+        if (
+            path in forbidden
+            or "year=2026" in path.as_posix()
+            or "raw/" in path.as_posix()
+        ):
+            raise AssertionError(f"forbidden pre-test dependency opened: {path}")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded)
+    if operation == "create":
+        freeze_candidate(
+            "F1002",
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+            freeze_fixture["experiments"],
+        )
+    else:
+        assert frozen is not None
+        validate_freeze(
+            frozen.freeze_path,
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+        )
+
+
+@pytest.mark.parametrize(
+    "attack",
+    [
+        "legacy_missing_capability",
+        "forged_capability",
+        "unbound_capability",
+        "extra_safe_artifact",
+        "wrong_reference_hash",
+        "quality_false_pass",
+    ],
+)
+def test_pretest_capability_attacks_fail_before_any_parquet_open(
+    freeze_fixture: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    attack: str,
+) -> None:
+    root_path = freeze_fixture["exposure_manifest"]
+    root = json.loads(root_path.read_text(encoding="utf-8"))
+    capability_path = root_path.parent / "pretest_capability.json"
+    capability = json.loads(capability_path.read_text(encoding="utf-8"))
+    if attack == "legacy_missing_capability":
+        del root["pretest_capability"]
+        _write_json(root_path, root)
+    elif attack == "forged_capability":
+        capability_path.write_bytes(capability_path.read_bytes() + b" ")
+    elif attack == "unbound_capability":
+        root["pretest_capability"]["capability_id"] = "pretest-" + "0" * 20
+        _write_json(root_path, root)
+    elif attack == "wrong_reference_hash":
+        root["pretest_capability"]["sha256"] = "0" * 64
+        _write_json(root_path, root)
+    else:
+        if attack == "extra_safe_artifact":
+            capability["artifacts"].append(
+                {
+                    "domain": "exposure",
+                    "name": "unexpected.parquet",
+                    "sha256": "0" * 64,
+                    "row_count": 1,
+                }
+            )
+        else:
+            capability["quality"]["status"] = "fail"
+        _write_json(capability_path, capability)
+        root["pretest_capability"]["sha256"] = _sha256(capability_path)
+        _write_json(root_path, root)
+
+    real_open = Path.open
+
+    def forbidden_open(path: Path, *args: object, **kwargs: object) -> object:
+        if path.suffix == ".parquet":
+            raise AssertionError("capability attack reached a Parquet file")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", forbidden_open)
+    with pytest.raises(ValueError):
+        freeze_candidate(
+            "F1002",
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+            freeze_fixture["experiments"],
+        )
+
+
 def test_freeze_allows_second_approved_candidate(
     freeze_fixture: dict[str, Path],
 ) -> None:
@@ -230,208 +352,12 @@ def test_freeze_rejects_policy_retargeted_to_another_phase5_snapshot(
 
 
 @pytest.mark.parametrize(
-    "corruption",
-    [
-        "phase5_header_only",
-        "phase5_identity",
-        "exposure_header_only",
-        "exposure_identity",
-        "exposure_quality_error",
-        "exposure_extra_artifact",
-        "phase5_raw_checksum",
-        "exposure_artifact_checksum",
-    ],
-)
-def test_freeze_rejects_noncanonical_published_snapshot_manifests(
-    freeze_fixture: dict[str, Path],
-    corruption: str,
-) -> None:
-    phase5_path = freeze_fixture["phase5_manifest"]
-    exposure_path = freeze_fixture["exposure_manifest"]
-    phase5 = json.loads(phase5_path.read_text(encoding="utf-8"))
-    exposure = json.loads(exposure_path.read_text(encoding="utf-8"))
-    if corruption == "phase5_header_only":
-        phase5 = {
-            "snapshot_id": phase5["snapshot_id"],
-            "snapshot_type": "research_market",
-        }
-        _write_json(phase5_path, phase5)
-        exposure["phase5_manifest_sha256"] = _sha256(phase5_path)
-        _write_json(exposure_path, exposure)
-    elif corruption == "phase5_identity":
-        phase5["identity_sha256"] = "0" * 64
-        _write_json(phase5_path, phase5)
-        exposure["phase5_manifest_sha256"] = _sha256(phase5_path)
-        _write_json(exposure_path, exposure)
-    elif corruption == "exposure_header_only":
-        _write_json(
-            exposure_path,
-            {
-                "snapshot_id": exposure["snapshot_id"],
-                "snapshot_type": "point_in_time_exposure",
-                "phase5_snapshot_id": exposure["phase5_snapshot_id"],
-                "phase5_manifest_sha256": exposure["phase5_manifest_sha256"],
-                "policy_sha256": exposure["policy_sha256"],
-            },
-        )
-    elif corruption == "exposure_identity":
-        exposure["identity_sha256"] = "0" * 64
-        _write_json(exposure_path, exposure)
-    elif corruption == "exposure_quality_error":
-        exposure["quality_status"] = "error"
-        _write_json(exposure_path, exposure)
-    elif corruption == "exposure_extra_artifact":
-        exposure["artifacts"].append(
-            {
-                "name": "unexpected.parquet",
-                "format": "parquet",
-                "sha256": "f" * 64,
-                "row_count": 1,
-                "path": f"exposures/{exposure['snapshot_id']}/unexpected.parquet",
-            }
-        )
-        _write_json(exposure_path, exposure)
-    elif corruption == "phase5_raw_checksum":
-        raw_path = freeze_fixture["data"] / phase5["raw_inputs"][0]["path"]
-        raw_path.write_bytes(raw_path.read_bytes() + b"corrupt")
-    else:
-        artifact_path = freeze_fixture["data"] / exposure["artifacts"][0]["path"]
-        artifact_path.write_bytes(artifact_path.read_bytes() + b"corrupt")
-
-    with pytest.raises(ValueError, match="manifest"):
-        freeze_candidate(
-            "F1002",
-            freeze_fixture["config"],
-            freeze_fixture["data"],
-            freeze_fixture["experiments"],
-        )
-
-
-@pytest.mark.parametrize("snapshot_kind", ["phase5", "exposure"])
-@pytest.mark.parametrize(
-    "corruption",
-    [
-        "empty_checks",
-        "missing_check",
-        "extra_check",
-        "malformed_check",
-        "false_pass",
-        "summary_row_count_drift",
-    ],
-)
-@pytest.mark.parametrize("operation", ["create", "validate"])
-def test_freeze_creation_and_validation_reject_invalid_quality_contracts(
-    freeze_fixture: dict[str, Path],
-    snapshot_kind: str,
-    corruption: str,
-    operation: str,
-) -> None:
-    frozen = None
-    if operation == "validate":
-        frozen = freeze_candidate(
-            "F1002",
-            freeze_fixture["config"],
-            freeze_fixture["data"],
-            freeze_fixture["experiments"],
-        )
-
-    _corrupt_and_republish_quality(freeze_fixture, snapshot_kind, corruption)
-
-    with pytest.raises(ValueError, match="quality"):
-        if frozen is None:
-            freeze_candidate(
-                "F1002",
-                freeze_fixture["config"],
-                freeze_fixture["data"],
-                freeze_fixture["experiments"],
-            )
-        else:
-            validate_freeze(
-                frozen.freeze_path,
-                freeze_fixture["config"],
-                freeze_fixture["data"],
-            )
-
-
-@pytest.mark.parametrize("operation", ["create", "validate"])
-def test_freeze_creation_and_validation_reject_phase5_scope_retarget(
-    freeze_fixture: dict[str, Path], operation: str
-) -> None:
-    frozen = None
-    if operation == "validate":
-        frozen = freeze_candidate(
-            "F1002",
-            freeze_fixture["config"],
-            freeze_fixture["data"],
-            freeze_fixture["experiments"],
-        )
-
-    _corrupt_and_republish_quality(freeze_fixture, "phase5", "coherent_scope_retarget")
-
-    with pytest.raises(ValueError, match="quality.*scope"):
-        if frozen is None:
-            freeze_candidate(
-                "F1002",
-                freeze_fixture["config"],
-                freeze_fixture["data"],
-                freeze_fixture["experiments"],
-            )
-        else:
-            validate_freeze(
-                frozen.freeze_path,
-                freeze_fixture["config"],
-                freeze_fixture["data"],
-            )
-
-
-@pytest.mark.parametrize("operation", ["create", "validate"])
-@pytest.mark.parametrize(
-    "corruption",
-    [
-        "detached_minimum_coverage",
-        "expected_industry_count_drift",
-        "observed_observation_count_drift",
-        "expected_security_count_drift",
-    ],
-)
-def test_freeze_creation_and_validation_reject_detached_exposure_coverage(
-    freeze_fixture: dict[str, Path], operation: str, corruption: str
-) -> None:
-    frozen = None
-    if operation == "validate":
-        frozen = freeze_candidate(
-            "F1002",
-            freeze_fixture["config"],
-            freeze_fixture["data"],
-            freeze_fixture["experiments"],
-        )
-
-    _corrupt_and_republish_quality(freeze_fixture, "exposure", corruption)
-
-    with pytest.raises(ValueError, match="quality.*row_counts"):
-        if frozen is None:
-            freeze_candidate(
-                "F1002",
-                freeze_fixture["config"],
-                freeze_fixture["data"],
-                freeze_fixture["experiments"],
-            )
-        else:
-            validate_freeze(
-                frozen.freeze_path,
-                freeze_fixture["config"],
-                freeze_fixture["data"],
-            )
-
-
-@pytest.mark.parametrize(
     "target",
     [
         "source",
         "metadata",
         "robustness_policy",
         "cost_policy",
-        "phase5_manifest",
         "exposure_manifest",
         "pointer",
     ],
@@ -584,8 +510,7 @@ def test_freeze_rejects_candidate_untracked_at_head(
     [
         ("source", "factor source"),
         ("metadata", "factor metadata"),
-        ("phase5_manifest", "Phase 5 manifest"),
-        ("exposure_manifest", "exposure manifest"),
+        ("exposure_manifest", "exposure root manifest"),
         ("robustness_policy", "robustness policy"),
         ("cost_policy", "cost policy"),
         ("git", "Git commit"),
@@ -847,6 +772,26 @@ def _write_exposure_snapshot(
         "raw_request_identities": [raw_identity],
         "artifacts": artifact_identities,
     }
+    phase5_manifest = json.loads(
+        (data_dir / "manifests" / phase5_id / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    capability = build_pretest_capability(
+        phase5_manifest,
+        {
+            "phase5_manifest_sha256": phase5_sha256,
+            "policy_sha256": policy_sha256,
+            "artifacts": artifact_identities,
+        },
+    )
+    capability_content = _canonical_json_bytes(capability)
+    capability_reference = {
+        "path": "pretest_capability.json",
+        "sha256": hashlib.sha256(capability_content).hexdigest(),
+        "capability_id": capability["capability_id"],
+    }
+    identity["pretest_capability"] = capability_reference
     identity_sha256 = hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
     snapshot_id = f"p6x-{identity_sha256[:20]}"
     raw_path = data_dir / "raw" / "tushare" / "fixture" / "exposure.parquet"
@@ -858,6 +803,7 @@ def _write_exposure_snapshot(
     quality_path = data_dir / "manifests" / snapshot_id / "quality_report.json"
     quality_path.parent.mkdir(parents=True)
     quality_path.write_bytes(quality_bytes)
+    (quality_path.parent / "pretest_capability.json").write_bytes(capability_content)
     manifest = {
         "schema_version": 1,
         "snapshot_id": snapshot_id,
@@ -881,6 +827,7 @@ def _write_exposure_snapshot(
             "path": f"manifests/{snapshot_id}/quality_report.json",
             "sha256": hashlib.sha256(quality_bytes).hexdigest(),
         },
+        "pretest_capability": capability_reference,
     }
     manifest_path = quality_path.with_name("manifest.json")
     manifest_path.write_bytes(_canonical_json_bytes(manifest))
@@ -990,6 +937,14 @@ def _republish_exposure_snapshot(
     if phase5_manifest_sha256 is not None:
         manifest["phase5_manifest_sha256"] = phase5_manifest_sha256
     manifest["quality_report"]["sha256"] = hashlib.sha256(quality_bytes).hexdigest()
+    phase5_manifest = json.loads(fixture["phase5_manifest"].read_text(encoding="utf-8"))
+    capability = build_pretest_capability(phase5_manifest, manifest)
+    capability_bytes = _canonical_json_bytes(capability)
+    manifest["pretest_capability"] = {
+        "path": "pretest_capability.json",
+        "sha256": hashlib.sha256(capability_bytes).hexdigest(),
+        "capability_id": capability["capability_id"],
+    }
     identity = {
         "exposure_schema_version": manifest["schema_version"],
         "phase5_manifest_sha256": manifest["phase5_manifest_sha256"],
@@ -1014,6 +969,7 @@ def _republish_exposure_snapshot(
             {key: item[key] for key in ("name", "sha256", "row_count")}
             for item in manifest["artifacts"]
         ],
+        "pretest_capability": manifest["pretest_capability"],
     }
     identity_sha256 = hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
     new_snapshot_id = f"p6x-{identity_sha256[:20]}"
@@ -1030,6 +986,7 @@ def _republish_exposure_snapshot(
     new_manifest_dir = data_dir / "manifests" / new_snapshot_id
     new_manifest_dir.mkdir(parents=True)
     (new_manifest_dir / "quality_report.json").write_bytes(quality_bytes)
+    (new_manifest_dir / "pretest_capability.json").write_bytes(capability_bytes)
     new_manifest_path = new_manifest_dir / "manifest.json"
     new_manifest_path.write_bytes(_canonical_json_bytes(manifest))
     pointer = data_dir / "state" / "latest_exposure_snapshot.txt"

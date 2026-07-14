@@ -112,6 +112,10 @@ the transaction's TOCTOU seal. Only the canonical full artifact populates
 `ref.industry_membership_history`; the pre-test derivative remains an external
 artifact and is never duplicated into a DuckDB fact table.
 
+The canonical capability is registered as `meta.pretest_data_capability` (JSON
+in the report layer) and its physical bytes participate in the final pre-commit
+TOCTOU seal. It is metadata only and does not duplicate market facts.
+
 Small Phase 5 reference artifacts, their quality report and Phase 6 industry
 artifacts are hashed and parsed from the same in-memory byte buffer, so derived
 catalog rows cannot come from bytes different from the verified digest. After

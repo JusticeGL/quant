@@ -630,6 +630,16 @@ def sync_exposure_snapshot(
                 exposure_verified_sha256 = _verify_manifest_artifacts(
                     data_dir, current_manifest, include_quality_report=True
                 )
+                capability = _catalog_capability_reference(current_manifest)
+                capability_path = _resolve_catalog_artifact(
+                    data_dir, str(capability["path"])
+                )
+                capability_sha256 = file_sha256(capability_path)
+                if capability_sha256 != capability["sha256"]:
+                    raise ValueError(
+                        "catalog artifact checksum mismatch: pre-test capability"
+                    )
+                exposure_verified_sha256[str(capability["path"])] = capability_sha256
                 _sync_research_manifest(
                     connection,
                     data_dir,
@@ -852,6 +862,28 @@ def _sync_exposure_manifest(
         snapshot_id,
         quality_artifact_id,
         "meta.exposure_quality_report",
+    )
+    capability = _catalog_capability_reference(manifest)
+    capability_sha256 = _registration_sha256(data_dir, capability, verified_sha256)
+    capability_artifact_id = _upsert_artifact(
+        connection,
+        data_dir,
+        layer="report",
+        dataset_name="meta.pretest_data_capability",
+        relative_path=str(capability["path"]),
+        artifact_format="json",
+        sha256=capability_sha256,
+        schema_version=int(manifest["schema_version"]),
+        source_id=None,
+        row_count=None,
+        min_event_date=scope["start_date"],
+        max_event_date="2025-12-31",
+    )
+    _link_artifact(
+        connection,
+        snapshot_id,
+        capability_artifact_id,
+        "meta.pretest_data_capability",
     )
 
     _sync_exposure_industries(
@@ -1104,6 +1136,21 @@ def _registration_sha256(
     if actual_sha256 != expected_sha256:
         raise ValueError(f"catalog artifact changed during sync: {relative_path}")
     return actual_sha256
+
+
+def _catalog_capability_reference(manifest: dict[str, Any]) -> dict[str, Any]:
+    reference = manifest.get("pretest_capability")
+    if (
+        not isinstance(reference, dict)
+        or reference.get("path") != "pretest_capability.json"
+    ):
+        raise ValueError("pre-test capability reference is invalid")
+    return {
+        "path": (
+            Path("manifests") / str(manifest["snapshot_id"]) / "pretest_capability.json"
+        ).as_posix(),
+        "sha256": reference.get("sha256"),
+    }
 
 
 def _resolve_catalog_artifact(data_dir: Path, relative_path: str) -> Path:

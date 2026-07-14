@@ -37,6 +37,24 @@ industries. Industry membership requires
   securities, or inadequate coverage stop publication.
 - Current industry values are never used to backfill history.
 
+Task 2 also publishes canonical
+`manifests/<p6x-id>/pretest_capability.json`. Its content deliberately contains
+no p6x ID or p6x path, so its content-derived identity can be referenced by the
+p6x root without a hash cycle. The root identity binds the complete
+manifest-relative `{path, sha256, capability_id}` reference. The capability
+contains only the fixed `2026-01-01` cutoff, opaque Phase 5 parent ID/manifest
+SHA, policy SHA, pre-2026 Phase 5 market partitions, pre-2026 market-cap
+partitions, industry definitions, the isolated pre-test membership, and exact
+safe-subset quality metadata. It excludes full membership, full quality
+reports, raw-cache paths and 2026 counts.
+
+Publication and catalog administration re-derive this capability from the full
+roots. Freeze creation, freeze validation and pre-test readers use a pure
+capability validator instead: it may parse the p6x root and recompute its
+identity as opaque parent metadata, but cannot open either full quality report,
+the Phase 5 root, raw cache, a 2026 partition, or full membership. Both readers
+are located by the root p6x ID; there is no Phase 5-manifest fallback.
+
 The immutable exposure snapshot ID is `p6x-<identity-prefix>`. Its identity
 includes the Phase 5 manifest hash, every raw exposure artifact hash, the
 exposure configuration hash, and the schema version. Daily market-cap facts and

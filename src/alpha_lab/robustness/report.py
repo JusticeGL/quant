@@ -66,7 +66,9 @@ def evaluate_frozen_candidate(
         raise ValueError("validated freeze cost dependency is malformed")
 
     safe_end_before = robustness.test.start
-    market = read_pretest_market(data_dir, str(phase5["snapshot_id"]), safe_end_before)
+    market = read_pretest_market(
+        data_dir, str(exposure["snapshot_id"]), safe_end_before
+    )
     market_cap, industries = read_pretest_exposures(
         data_dir, str(exposure["snapshot_id"]), safe_end_before
     )

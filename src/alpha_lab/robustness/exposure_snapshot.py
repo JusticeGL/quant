@@ -28,6 +28,13 @@ from alpha_lab.robustness.exposure_data import (
     acquire_exposure_tables,
     validate_exposure_tables,
 )
+from alpha_lab.robustness.pretest_capability import (
+    build_pretest_capability,
+    root_identity,
+)
+from alpha_lab.robustness.pretest_capability import (
+    canonical_bytes as capability_bytes,
+)
 
 EXPOSURE_SCHEMA_VERSION = 1
 PRETEST_CUTOFF = date(2026, 1, 1)
@@ -110,6 +117,29 @@ def materialize_exposure_snapshot(
             "end_date": config.test.end.isoformat(),
             "minimum_temporal_coverage": config.minimum_fold_coverage,
         }
+        artifact_identities = [
+            {
+                "name": item["name"],
+                "sha256": item["sha256"],
+                "row_count": item["row_count"],
+            }
+            for item in artifacts
+        ]
+        phase5_document = json.loads(phase5_manifest_path.read_text(encoding="utf-8"))
+        capability = build_pretest_capability(
+            phase5_document,
+            {
+                "phase5_manifest_sha256": phase5_sha256,
+                "policy_sha256": policy_sha256,
+                "artifacts": artifact_identities,
+            },
+        )
+        capability_content = capability_bytes(capability)
+        capability_reference = {
+            "path": "pretest_capability.json",
+            "sha256": hashlib.sha256(capability_content).hexdigest(),
+            "capability_id": capability["capability_id"],
+        }
         identity = {
             "exposure_schema_version": EXPOSURE_SCHEMA_VERSION,
             "phase5_manifest_sha256": phase5_sha256,
@@ -117,14 +147,8 @@ def materialize_exposure_snapshot(
             "quality_report_sha256": quality_sha256,
             "coverage_scope": coverage_scope,
             "raw_request_identities": raw_identities,
-            "artifacts": [
-                {
-                    "name": item["name"],
-                    "sha256": item["sha256"],
-                    "row_count": item["row_count"],
-                }
-                for item in artifacts
-            ],
+            "artifacts": artifact_identities,
+            "pretest_capability": capability_reference,
         }
         identity_sha256 = hashlib.sha256(_canonical_bytes(identity)).hexdigest()
         snapshot_id = f"p6x-{identity_sha256[:20]}"
@@ -138,6 +162,7 @@ def materialize_exposure_snapshot(
         quality_path = manifest_dir / "quality_report.json"
         manifest_path = manifest_dir / "manifest.json"
         _write_immutable(quality_path, quality_bytes)
+        _write_immutable(manifest_dir / "pretest_capability.json", capability_content)
         manifest_artifacts = [
             {
                 **item,
@@ -178,6 +203,7 @@ def materialize_exposure_snapshot(
                 "path": _expected_quality_reference_path(snapshot_id),
                 "sha256": quality_sha256,
             },
+            "pretest_capability": capability_reference,
         }
         _require_quality_reference(manifest["quality_report"], snapshot_id)
         _write_immutable(manifest_path, _canonical_bytes(manifest))
@@ -218,35 +244,7 @@ def validate_exposure_snapshot(data_dir: Path, snapshot_id: str) -> dict[str, ob
     checked = 0
     failures: list[str] = []
     quality_reference = manifest.get("quality_report")
-    identity = {
-        "exposure_schema_version": manifest.get("schema_version"),
-        "phase5_manifest_sha256": manifest.get("phase5_manifest_sha256"),
-        "policy_sha256": manifest.get("policy_sha256"),
-        "quality_report_sha256": (
-            quality_reference.get("sha256")
-            if isinstance(quality_reference, dict)
-            else None
-        ),
-        "coverage_scope": manifest.get("coverage_scope"),
-        "raw_request_identities": [
-            {
-                key: item.get(key)
-                for key in (
-                    "api_name",
-                    "request_sha256",
-                    "sha256",
-                    "row_count",
-                    "params",
-                    "fields",
-                )
-            }
-            for item in manifest.get("raw_inputs", [])
-        ],
-        "artifacts": [
-            {key: item.get(key) for key in ("name", "sha256", "row_count")}
-            for item in manifest.get("artifacts", [])
-        ],
-    }
+    identity = root_identity(manifest)
     actual_identity = hashlib.sha256(_canonical_bytes(identity)).hexdigest()
     if (
         manifest.get("identity_sha256") != actual_identity
@@ -256,6 +254,7 @@ def validate_exposure_snapshot(data_dir: Path, snapshot_id: str) -> dict[str, ob
     failures.extend(_phase5_dependency_failures(data_dir, manifest))
     failures.extend(_artifact_layout_failures(data_dir, manifest))
     failures.extend(_pretest_membership_failures(data_dir, manifest))
+    failures.extend(_pretest_capability_failures(data_dir, manifest))
     for item in [*manifest.get("raw_inputs", []), *manifest.get("artifacts", [])]:
         path = data_dir / str(item["path"])
         checked += 1
@@ -582,6 +581,42 @@ def _pretest_membership_failures(data_dir: Path, manifest: dict[str, Any]) -> li
                 raise ValueError("pre-test membership bytes differ from derivation")
     except (AssertionError, KeyError, TypeError, ValueError, OSError):
         return ["industry_membership_pretest"]
+    return []
+
+
+def _pretest_capability_failures(data_dir: Path, manifest: dict[str, Any]) -> list[str]:
+    try:
+        snapshot_id = str(manifest["snapshot_id"])
+        reference = manifest["pretest_capability"]
+        if (
+            not isinstance(reference, dict)
+            or set(reference) != {"path", "sha256", "capability_id"}
+            or reference["path"] != "pretest_capability.json"
+        ):
+            raise ValueError("invalid capability reference")
+        path = _manifest_dir(data_dir, snapshot_id) / "pretest_capability.json"
+        content = path.read_bytes()
+        if hashlib.sha256(content).hexdigest() != reference["sha256"]:
+            raise ValueError("capability checksum mismatch")
+        actual = json.loads(content)
+        phase5_path = (
+            data_dir
+            / "manifests"
+            / str(manifest["phase5_snapshot_id"])
+            / "manifest.json"
+        )
+        phase5 = json.loads(phase5_path.read_text(encoding="utf-8"))
+        expected = build_pretest_capability(phase5, manifest)
+        if (
+            content != capability_bytes(actual)
+            or actual != expected
+            or actual.get("capability_id") != reference["capability_id"]
+        ):
+            raise ValueError("capability differs from full publication inputs")
+        # The full publication validator additionally authenticates each safe
+        # physical artifact through the root artifact loop above.
+    except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+        return ["pretest_capability"]
     return []
 
 

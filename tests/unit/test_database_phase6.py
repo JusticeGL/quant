@@ -221,6 +221,12 @@ def test_exposure_snapshot_sync_is_bulk_and_idempotent(tmp_path: Path) -> None:
             WHERE dataset_name = 'ref.industry_membership_pretest_artifact'
             """
         ).fetchone()[0]
+        capabilities = connection.execute(
+            """
+            SELECT count(*) FROM meta.artifact
+            WHERE dataset_name = 'meta.pretest_data_capability'
+            """
+        ).fetchone()[0]
 
     assert market_table_count == 0
     assert membership == (
@@ -230,6 +236,7 @@ def test_exposure_snapshot_sync_is_bulk_and_idempotent(tmp_path: Path) -> None:
         None,
     )
     assert pretest_artifacts == 1
+    assert capabilities == 1
 
 
 def test_exposure_snapshot_sync_rejects_tampered_artifact(tmp_path: Path) -> None:
@@ -251,7 +258,7 @@ def test_exposure_snapshot_sync_rejects_tampered_artifact(tmp_path: Path) -> Non
 
 @pytest.mark.parametrize(
     "target",
-    ["market_cap", "raw", "quality", "industry", "phase5"],
+    ["market_cap", "raw", "quality", "industry", "capability", "phase5"],
 )
 def test_exposure_sync_rejects_post_validation_file_tamper_and_rolls_back(
     tmp_path: Path,
@@ -346,7 +353,15 @@ def test_exposure_sync_rolls_back_a_forced_mid_transaction_failure(
 
 
 @pytest.mark.parametrize(
-    "target", ["market_cap", "raw", "quality", "industry", "industry_pretest"]
+    "target",
+    [
+        "market_cap",
+        "raw",
+        "quality",
+        "industry",
+        "industry_pretest",
+        "capability",
+    ],
 )
 def test_exposure_sync_final_seal_rejects_tamper_after_artifact_upsert(
     tmp_path: Path,
@@ -708,6 +723,8 @@ def _post_validation_target(
             for artifact in manifest["artifacts"]
             if artifact["name"] == "industry_membership_pretest.parquet"
         )
+    elif target == "capability":
+        return manifest_path.parent / "pretest_capability.json"
     elif target == "phase5":
         phase5_path = (
             data_dir / "manifests" / manifest["phase5_snapshot_id"] / "manifest.json"
@@ -842,6 +859,15 @@ def _write_phase5_fixture(data_dir: Path) -> Path:
         ]
     )
     daily = universe.rename(columns={"as_of_date": "trade_date"})
+    dated_safe = pd.DataFrame(
+        [
+            {
+                "trade_date": pd.Timestamp("2021-01-04"),
+                "security_id": "CN:SSE:600000",
+                "known_at": pd.Timestamp("2021-01-04", tz="UTC"),
+            }
+        ]
+    )
     frames = {
         "security_master.parquet": security,
         "security_name_history.parquet": names,
@@ -849,6 +875,8 @@ def _write_phase5_fixture(data_dir: Path) -> Path:
         "universe_dates.parquet": universe,
         "daily_bar/year=2021/part.parquet": daily.iloc[:1],
         "daily_bar/year=2026/part.parquet": daily.iloc[1:],
+        "adjustment_factor/year=2021/part.parquet": dated_safe,
+        "daily_status/year=2021/part.parquet": dated_safe,
     }
     artifacts: list[dict[str, object]] = []
     for name, frame in frames.items():

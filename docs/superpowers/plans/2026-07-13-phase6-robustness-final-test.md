@@ -251,10 +251,16 @@ git commit -m "feat: catalog phase 6 exposure metadata"
 - Test: `tests/unit/test_candidate_freeze.py`
 
 **Interfaces:**
-- Produces: `read_pretest_market(data_dir: Path, snapshot_id: str, end_before: date) -> pd.DataFrame`.
+- Produces: `read_pretest_market(data_dir: Path, capability_snapshot_id: str, end_before: date) -> pd.DataFrame`; the ID is the root p6x snapshot and no Phase 5-manifest fallback is allowed.
 - Produces: `read_pretest_exposures(data_dir: Path, snapshot_id: str, end_before: date) -> tuple[pd.DataFrame, pd.DataFrame]`.
 - Produces: `freeze_candidate(factor_id: str, config_dir: Path, data_dir: Path, experiments_dir: Path) -> FrozenCandidate`.
 - Produces: `validate_freeze(freeze_path: Path, config_dir: Path, data_dir: Path) -> dict[str, object]`.
+
+Task 2 publishes `manifests/<p6x-id>/pretest_capability.json` and binds its
+manifest-relative reference into root identity. Task 4/5 freeze and reader
+paths validate only that capability and its safe artifact list. Full roots and
+full quality reports remain publication/catalog inputs and future approved
+Task 6 final-test inputs only.
 
 - [ ] **Step 1: Write failing locked-read tests**
 

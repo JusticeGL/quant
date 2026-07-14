@@ -13,6 +13,10 @@ import pytest
 
 from alpha_lab.robustness import io as robustness_io
 from alpha_lab.robustness.io import read_pretest_exposures, read_pretest_market
+from alpha_lab.robustness.pretest_capability import (
+    build_pretest_capability,
+    root_identity,
+)
 
 LOCKED_START = date(2026, 1, 1)
 
@@ -107,7 +111,7 @@ def test_pretest_market_opens_only_canonical_pre2026_parts_and_filters_rows(
             root="research",
         ),
     ]
-    _write_manifest(tmp_path, snapshot_id, "research_market", artifacts)
+    snapshot_id = _write_manifest(tmp_path, snapshot_id, "research_market", artifacts)
     real_reader = pd.read_parquet
     opened: list[str] = []
 
@@ -165,7 +169,6 @@ def test_pretest_market_rejects_extra_or_relabelled_parts_before_parquet_read(
         "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
         "row_count": 1,
     }
-    _write_manifest(tmp_path, "p5-fixture", "research_market", [artifact])
     opened = False
 
     def forbidden(*args: object, **kwargs: object) -> pd.DataFrame:
@@ -175,8 +178,11 @@ def test_pretest_market_rejects_extra_or_relabelled_parts_before_parquet_read(
 
     monkeypatch.setattr(pd, "read_parquet", forbidden)
 
-    with pytest.raises(ValueError, match="canonical"):
-        read_pretest_market(tmp_path, "p5-fixture", date(2025, 12, 31))
+    with pytest.raises(ValueError):
+        snapshot_id = _write_manifest(
+            tmp_path, "p5-fixture", "research_market", [artifact]
+        )
+        read_pretest_market(tmp_path, snapshot_id, date(2025, 12, 31))
 
     assert opened is False
 
@@ -201,7 +207,7 @@ def test_pretest_market_rejects_canonical_path_symlinked_to_locked_partition(
         "sha256": hashlib.sha256(locked.read_bytes()).hexdigest(),
         "row_count": 1,
     }
-    _write_manifest(tmp_path, snapshot_id, "research_market", [artifact])
+    snapshot_id = _write_manifest(tmp_path, snapshot_id, "research_market", [artifact])
 
     with pytest.raises(ValueError, match="symlink"):
         read_pretest_market(tmp_path, snapshot_id, date(2025, 12, 31))
@@ -290,7 +296,9 @@ def test_pretest_exposures_skip_locked_market_cap_and_bound_membership(
             root="exposures",
         ),
     ]
-    _write_manifest(tmp_path, snapshot_id, "point_in_time_exposure", artifacts)
+    snapshot_id = _write_manifest(
+        tmp_path, snapshot_id, "point_in_time_exposure", artifacts
+    )
     real_reader = pd.read_parquet
     opened: list[str] = []
 
@@ -320,7 +328,7 @@ def test_pretest_exposures_skip_locked_market_cap_and_bound_membership(
 def test_pretest_exposures_fail_closed_without_safe_membership(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    snapshot_id = "p6x-legacy"
+    snapshot_id = "p6x-" + "0" * 20
     artifacts = [
         _parquet_artifact(
             tmp_path,
@@ -337,7 +345,9 @@ def test_pretest_exposures_fail_closed_without_safe_membership(
             root="exposures",
         ),
     ]
-    _write_manifest(tmp_path, snapshot_id, "point_in_time_exposure", artifacts)
+    _write_manifest(
+        tmp_path, snapshot_id, "point_in_time_exposure", artifacts, legacy=True
+    )
     real_reader = pd.read_parquet
     opened: list[str] = []
 
@@ -347,7 +357,7 @@ def test_pretest_exposures_fail_closed_without_safe_membership(
 
     monkeypatch.setattr(pd, "read_parquet", guarded)
 
-    with pytest.raises(ValueError, match="pretest"):
+    with pytest.raises(ValueError, match="pre-test"):
         read_pretest_exposures(tmp_path, snapshot_id, LOCKED_START)
 
     assert opened == []
@@ -454,7 +464,9 @@ def _dated_snapshot_with_known_at(
                 root="exposures",
             ),
         ]
-        _write_manifest(data_dir, snapshot_id, "point_in_time_exposure", artifacts)
+        snapshot_id = _write_manifest(
+            data_dir, snapshot_id, "point_in_time_exposure", artifacts
+        )
         return read_pretest_exposures, snapshot_id
     snapshot_id = "p5-fixture"
     artifacts = [
@@ -467,7 +479,7 @@ def _dated_snapshot_with_known_at(
         )
         for dataset in ("daily_bar", "adjustment_factor", "daily_status")
     ]
-    _write_manifest(data_dir, snapshot_id, "research_market", artifacts)
+    snapshot_id = _write_manifest(data_dir, snapshot_id, "research_market", artifacts)
     return read_pretest_market, snapshot_id
 
 
@@ -496,12 +508,113 @@ def _write_manifest(
     snapshot_id: str,
     snapshot_type: str,
     artifacts: list[dict[str, object]],
-) -> None:
-    path = data_dir / "manifests" / snapshot_id / "manifest.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    document = {
-        "snapshot_id": snapshot_id,
-        "snapshot_type": snapshot_type,
-        "artifacts": artifacts,
+    *,
+    legacy: bool = False,
+) -> str:
+    if legacy:
+        path = data_dir / "manifests" / snapshot_id / "manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "snapshot_id": snapshot_id,
+                    "snapshot_type": snapshot_type,
+                    "artifacts": artifacts,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return snapshot_id
+
+    phase5_id = "p5-fixture"
+    phase5_artifacts = artifacts if snapshot_type == "research_market" else []
+    exposure_artifacts = artifacts if snapshot_type == "point_in_time_exposure" else []
+    for dataset in ("daily_bar", "adjustment_factor", "daily_status"):
+        if not any(
+            str(item["name"]).startswith(f"{dataset}/") for item in phase5_artifacts
+        ):
+            frame = pd.DataFrame(
+                [
+                    {
+                        "trade_date": pd.Timestamp("2025-01-02"),
+                        "security_id": "CN:SSE:600000",
+                        "known_at": pd.Timestamp("2025-01-02", tz="UTC"),
+                    }
+                ]
+            )
+            phase5_artifacts.append(
+                _parquet_artifact(
+                    data_dir,
+                    phase5_id,
+                    f"{dataset}/year=2025/part.parquet",
+                    frame,
+                    root="research",
+                )
+            )
+    exposure_names = {str(item["name"]) for item in exposure_artifacts}
+    dummy_frames = {
+        "market_cap/year=2025/part.parquet": pd.DataFrame([_market_cap("2025-01-02")]),
+        "industry_definition.parquet": pd.DataFrame([{"industry_id": "SW:test"}]),
+        "industry_membership_pretest.parquet": pd.DataFrame(
+            [
+                {
+                    **_membership("2025-01-02T00:00:00Z"),
+                    "effective_to": pd.Timestamp("2025-12-31"),
+                }
+            ]
+        ),
     }
-    path.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
+    for name, frame in dummy_frames.items():
+        if name not in exposure_names:
+            temporary = _parquet_artifact(
+                data_dir, "p6x-temporary", name, frame, root="exposures"
+            )
+            exposure_artifacts.append(temporary)
+    phase5_manifest = {"snapshot_id": phase5_id, "artifacts": phase5_artifacts}
+    root = {
+        "schema_version": 1,
+        "snapshot_type": "point_in_time_exposure",
+        "phase5_snapshot_id": phase5_id,
+        "phase5_manifest_sha256": "a" * 64,
+        "policy_sha256": "b" * 64,
+        "coverage_scope": {},
+        "raw_inputs": [],
+        "artifacts": exposure_artifacts,
+        "quality_report": {"path": "unused", "sha256": "c" * 64},
+    }
+    capability = build_pretest_capability(phase5_manifest, root)
+    capability_content = (
+        json.dumps(capability, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode()
+    root["pretest_capability"] = {
+        "path": "pretest_capability.json",
+        "sha256": hashlib.sha256(capability_content).hexdigest(),
+        "capability_id": capability["capability_id"],
+    }
+    identity = hashlib.sha256(
+        (
+            json.dumps(root_identity(root), sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode()
+    ).hexdigest()
+    root_id = f"p6x-{identity[:20]}"
+    root["snapshot_id"] = root_id
+    root["identity_sha256"] = identity
+    for item in exposure_artifacts:
+        source = data_dir / str(item["path"])
+        destination = data_dir / "exposures" / root_id / str(item["name"])
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source != destination:
+            destination.write_bytes(source.read_bytes())
+        item["path"] = destination.relative_to(data_dir).as_posix()
+    path = data_dir / "manifests" / root_id / "manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    (path.parent / "pretest_capability.json").write_bytes(capability_content)
+    path.write_text(
+        json.dumps(root, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    return root_id

@@ -20,6 +20,7 @@ from alpha_lab.quality_contracts import (
 from alpha_lab.research_data.config import load_research_data_config
 from alpha_lab.robustness.config import load_robustness_config
 from alpha_lab.robustness.contracts import FrozenCandidate
+from alpha_lab.robustness.pretest_capability import validate_pretest_capability
 
 FREEZE_SCHEMA_VERSION = 1
 FIXED_PHASE5_SNAPSHOT_ID = "p5-ecaa6e8aeae6b9f8fb25"
@@ -139,31 +140,13 @@ def _current_payload(
     if metadata.factor_id != factor_id or metadata.status != "candidate":
         raise ValueError(f"factor metadata identity is invalid: {factor_id}")
 
-    phase5_path = (
-        data_dir / "manifests" / robustness.phase5_snapshot_id / "manifest.json"
-    )
-    _validate_phase5_manifest_structure(
-        phase5_path,
-        data_dir=data_dir,
-        config_dir=config_dir,
-        snapshot_id=robustness.phase5_snapshot_id,
-    )
-    phase5_sha256 = _sha256(phase5_path)
-
     exposure_id = _latest_exposure_snapshot_id(data_dir)
     exposure_path = data_dir / "manifests" / exposure_id / "manifest.json"
-    exposure = _validate_exposure_manifest_structure(
-        exposure_path,
-        data_dir=data_dir,
-        snapshot_id=exposure_id,
-        phase5_snapshot_id=robustness.phase5_snapshot_id,
-        phase5_manifest_sha256=phase5_sha256,
-        policy_sha256=robustness_sha256,
-        expected_scope={
-            "start_date": robustness.warmup.start.isoformat(),
-            "end_date": robustness.test.end.isoformat(),
-            "minimum_temporal_coverage": robustness.minimum_fold_coverage,
-        },
+    exposure, capability = validate_pretest_capability(data_dir, exposure_id)
+    phase5_parent = cast(dict[str, Any], capability["phase5_parent"])
+    phase5_sha256 = str(phase5_parent["manifest_sha256"])
+    phase5_path = (
+        data_dir / "manifests" / robustness.phase5_snapshot_id / "manifest.json"
     )
     if (
         exposure.get("phase5_snapshot_id") != robustness.phase5_snapshot_id
@@ -199,6 +182,8 @@ def _current_payload(
                 "snapshot_id": exposure_id,
                 "manifest_path": exposure_path.relative_to(data_dir).as_posix(),
                 "manifest_sha256": _sha256(exposure_path),
+                "capability_id": capability["capability_id"],
+                "capability_sha256": exposure["pretest_capability"]["sha256"],
             },
         },
         "policies": {
@@ -459,11 +444,23 @@ def _validate_freeze_document_schema(
     )
     exposure = _require_keys(
         snapshots["exposure"],
-        {"snapshot_id", "manifest_path", "manifest_sha256"},
+        {
+            "snapshot_id",
+            "manifest_path",
+            "manifest_sha256",
+            "capability_id",
+            "capability_sha256",
+        },
         "freeze exposure snapshot",
     )
     _validate_frozen_snapshot(phase5, "p5", "freeze Phase 5 snapshot")
     _validate_frozen_snapshot(exposure, "p6x", "freeze exposure snapshot")
+    if (
+        not isinstance(exposure["capability_id"], str)
+        or re.fullmatch(r"pretest-[0-9a-f]{20}", exposure["capability_id"]) is None
+        or not _is_sha256(exposure["capability_sha256"])
+    ):
+        raise ValueError("freeze exposure capability schema is invalid")
 
     policies = _require_keys(
         document.get("policies"), {"robustness", "costs"}, "freeze policies"

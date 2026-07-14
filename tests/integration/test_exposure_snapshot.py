@@ -23,6 +23,7 @@ from alpha_lab.robustness.exposure_snapshot import (
     materialize_exposure_snapshot,
     validate_exposure_snapshot,
 )
+from alpha_lab.robustness.pretest_capability import validate_pretest_capability
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -109,6 +110,8 @@ def test_exposure_snapshot_is_deterministic_and_validated_before_pointer(
     ).read_text().strip() == first.snapshot_id
     validation = validate_exposure_snapshot(tmp_path, first.snapshot_id)
     assert validation["healthy"] is True
+    root, capability = validate_pretest_capability(tmp_path, first.snapshot_id)
+    assert root["pretest_capability"]["capability_id"] == capability["capability_id"]
     manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
     assert first.manifest_path == (
         tmp_path / "manifests" / first.snapshot_id / "manifest.json"
@@ -442,7 +445,10 @@ def test_validation_rejects_quality_reference_with_extra_fields(tmp_path: Path) 
         ("security_master.parquet", "phase5:sha256:security_master.parquet"),
         ("index_membership.parquet", "phase5:sha256:index_membership.parquet"),
         ("universe_dates.parquet", "phase5:sha256:universe_dates.parquet"),
-        ("daily_bar/part.parquet", "phase5:sha256:daily_bar/part.parquet"),
+        (
+            "daily_bar/year=2021/part.parquet",
+            "phase5:sha256:daily_bar/year=2021/part.parquet",
+        ),
     ],
 )
 def test_validation_rejects_post_publication_phase5_tampering(
@@ -684,8 +690,14 @@ def _phase5_fixture(tmp_path: Path) -> Path:
     security = research / "security_master.parquet"
     membership = research / "index_membership.parquet"
     universe = research / "universe_dates.parquet"
-    daily = research / "daily_bar" / "part.parquet"
+    daily = research / "daily_bar" / "year=2021" / "part.parquet"
+    daily_2026 = research / "daily_bar" / "year=2026" / "part.parquet"
+    adjustment = research / "adjustment_factor" / "year=2021" / "part.parquet"
+    status = research / "daily_status" / "year=2021" / "part.parquet"
     daily.parent.mkdir(parents=True)
+    daily_2026.parent.mkdir(parents=True)
+    adjustment.parent.mkdir(parents=True)
+    status.parent.mkdir(parents=True)
     pd.DataFrame([{"security_id": "CN:SSE:600000"}]).to_parquet(security, index=False)
     pd.DataFrame([{"security_id": "CN:SSE:600000"}]).to_parquet(membership, index=False)
     pd.DataFrame(
@@ -706,12 +718,21 @@ def _phase5_fixture(tmp_path: Path) -> Path:
                 "trade_date": pd.Timestamp("2021-01-04"),
                 "security_id": "CN:SSE:600000",
             },
-            {
-                "trade_date": pd.Timestamp("2026-07-10"),
-                "security_id": "CN:SSE:600000",
-            },
         ]
     ).to_parquet(daily, index=False)
+    pd.DataFrame(
+        [{"trade_date": pd.Timestamp("2026-07-10"), "security_id": "CN:SSE:600000"}]
+    ).to_parquet(daily_2026, index=False)
+    for path in (adjustment, status):
+        pd.DataFrame(
+            [
+                {
+                    "trade_date": pd.Timestamp("2021-01-04"),
+                    "security_id": "CN:SSE:600000",
+                    "known_at": pd.Timestamp("2021-01-04", tz="UTC"),
+                }
+            ]
+        ).to_parquet(path, index=False)
     manifest_dir = tmp_path / "manifests" / "p5-ecaa6e8aeae6b9f8fb25"
     manifest_dir.mkdir(parents=True)
     manifest = {
@@ -724,7 +745,15 @@ def _phase5_fixture(tmp_path: Path) -> Path:
                 "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 "row_count": 1,
             }
-            for artifact in (security, membership, universe, daily)
+            for artifact in (
+                security,
+                membership,
+                universe,
+                daily,
+                daily_2026,
+                adjustment,
+                status,
+            )
         ],
     }
     path = manifest_dir / "manifest.json"

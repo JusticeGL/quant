@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from alpha_lab.data.normalize import to_qlib_instrument
+from alpha_lab.robustness.pretest_capability import validate_pretest_capability
 
 LOCKED_TEST_START = date(2026, 1, 1)
 _MARKET_DATASETS = ("daily_bar", "adjustment_factor", "daily_status")
@@ -19,11 +20,15 @@ def read_pretest_market(
     data_dir: Path, snapshot_id: str, end_before: date
 ) -> pd.DataFrame:
     _require_pretest_boundary(end_before)
-    manifest = _read_manifest(data_dir, snapshot_id, "research_market")
+    _, capability = validate_pretest_capability(data_dir, snapshot_id)
+    phase5_snapshot_id = str(capability["phase5_parent"]["snapshot_id"])
+    manifest = _capability_manifest(
+        capability, "phase5", phase5_snapshot_id, "research"
+    )
     selected = _pretest_partition_artifacts(
         data_dir,
         manifest,
-        snapshot_id,
+        phase5_snapshot_id,
         root="research",
         datasets=_MARKET_DATASETS,
     )
@@ -39,7 +44,8 @@ def read_pretest_exposures(
     data_dir: Path, snapshot_id: str, end_before: date
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     _require_pretest_boundary(end_before)
-    manifest = _read_manifest(data_dir, snapshot_id, "point_in_time_exposure")
+    _, capability = validate_pretest_capability(data_dir, snapshot_id)
+    manifest = _capability_manifest(capability, "exposure", snapshot_id, "exposures")
     selected = _pretest_partition_artifacts(
         data_dir,
         manifest,
@@ -97,6 +103,20 @@ def read_pretest_exposures(
         ["security_id", "effective_from", "industry_id"], kind="stable"
     ).reset_index(drop=True)
     return market_cap, bounded
+
+
+def _capability_manifest(
+    capability: dict[str, Any], domain: str, snapshot_id: str, root: str
+) -> dict[str, Any]:
+    artifacts = [
+        {
+            **item,
+            "path": (Path(root) / snapshot_id / str(item["name"])).as_posix(),
+        }
+        for item in capability["artifacts"]
+        if item["domain"] == domain
+    ]
+    return {"artifacts": artifacts}
 
 
 def _require_pretest_boundary(end_before: date) -> None:
