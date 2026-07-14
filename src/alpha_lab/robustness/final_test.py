@@ -20,8 +20,8 @@ from alpha_lab.factors.registry import FactorRegistry
 from alpha_lab.robustness.approval import (
     _write_immutable,
     canonical_bytes,
-    validate_execution_bundle_files,
     validate_approval,
+    validate_execution_bundle_files,
     validate_test_request,
 )
 from alpha_lab.robustness.config import WalkForwardFold, load_robustness_config
@@ -77,13 +77,7 @@ def run_final_test(
         "locked_test": test,
     }
     test_run_id = f"final-{hashlib.sha256(canonical_bytes(run_identity)).hexdigest()}"
-    output_dir = (
-        experiments_dir
-        / "phase6"
-        / state["freeze_id"]
-        / "final"
-        / test_run_id
-    )
+    output_dir = experiments_dir / "phase6" / state["freeze_id"] / "final" / test_run_id
     state["started_at"] = pd.Timestamp.now(tz="UTC").isoformat()
     try:
         market = _read_locked_market(
@@ -237,8 +231,7 @@ def _validate_freeze(state: dict[str, Any]) -> dict[str, Any]:
         freeze["freeze_id"] != state["freeze_id"]
         or freeze["freeze_sha256"] != state["freeze_sha256"]
         or freeze["test"] != state["locked_test"]
-        or path.parent
-        != state["experiments_dir"] / "phase6" / str(freeze["freeze_id"])
+        or path.parent != state["experiments_dir"] / "phase6" / str(freeze["freeze_id"])
     ):
         raise ValueError("freeze hash link or locked range does not match request")
     _read_admin_freeze(state["catalog_database"], freeze)
@@ -393,7 +386,9 @@ def _read_locked_exposures(
     return market, industry
 
 
-def _evaluate_locked_test(market: pd.DataFrame, state: dict[str, Any]) -> dict[str, Any]:
+def _evaluate_locked_test(
+    market: pd.DataFrame, state: dict[str, Any]
+) -> dict[str, Any]:
     robustness = state["robustness_config"]
     evaluation = state["evaluation_config"]
     evaluation_sha256 = state["evaluation_policy_sha256"]
@@ -625,12 +620,14 @@ def _record_final_run(
     ).hexdigest()
     finished_at = pd.Timestamp.now(tz="UTC").isoformat()
     status = "success" if result["status"] == "test_completed" else "failed"
-    with catalog._catalog_write_lock(database_path):
-        with duckdb.connect(str(database_path)) as connection:
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                connection.execute(
-                    """
+    with (
+        catalog._catalog_write_lock(database_path),
+        duckdb.connect(str(database_path)) as connection,
+    ):
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            connection.execute(
+                """
                     INSERT INTO research.final_test_run
                         (test_run_id, run_sha256, approval_id, request_id,
                          freeze_id, freeze_sha256, result_artifact_id,
@@ -641,33 +638,8 @@ def _record_final_run(
                             CAST(? AS TIMESTAMPTZ))
                     ON CONFLICT (test_run_id) DO NOTHING
                     """,
-                    [
-                        result["test_run_id"],
-                        run_sha256,
-                        state["approval_id"],
-                        state["request_id"],
-                        state["freeze_id"],
-                        state["freeze_sha256"],
-                        result_artifact_id,
-                        report_artifact_id,
-                        status,
-                        state["test"]["start"],
-                        state["test"]["end"],
-                        json.dumps(result, sort_keys=True, default=str),
-                        state["started_at"],
-                        finished_at,
-                    ],
-                )
-                stored = connection.execute(
-                    """
-                    SELECT run_sha256, approval_id, request_id, freeze_id,
-                           freeze_sha256, result_artifact_id,
-                           report_artifact_id, status
-                    FROM research.final_test_run WHERE test_run_id = ?
-                    """,
-                    [result["test_run_id"]],
-                ).fetchall()
-                expected = (
+                [
+                    result["test_run_id"],
                     run_sha256,
                     state["approval_id"],
                     state["request_id"],
@@ -676,13 +648,38 @@ def _record_final_run(
                     result_artifact_id,
                     report_artifact_id,
                     status,
-                )
-                if len(stored) != 1 or tuple(stored[0]) != expected:
-                    raise RuntimeError("final-test catalog registration conflict")
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
+                    state["test"]["start"],
+                    state["test"]["end"],
+                    json.dumps(result, sort_keys=True, default=str),
+                    state["started_at"],
+                    finished_at,
+                ],
+            )
+            stored = connection.execute(
+                """
+                    SELECT run_sha256, approval_id, request_id, freeze_id,
+                           freeze_sha256, result_artifact_id,
+                           report_artifact_id, status
+                    FROM research.final_test_run WHERE test_run_id = ?
+                    """,
+                [result["test_run_id"]],
+            ).fetchall()
+            expected = (
+                run_sha256,
+                state["approval_id"],
+                state["request_id"],
+                state["freeze_id"],
+                state["freeze_sha256"],
+                result_artifact_id,
+                report_artifact_id,
+                status,
+            )
+            if len(stored) != 1 or tuple(stored[0]) != expected:
+                raise RuntimeError("final-test catalog registration conflict")
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
 
 
 def _read_json(path: Path, label: str) -> dict[str, Any]:
@@ -700,6 +697,7 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
 def _final_markdown(result: dict[str, Any]) -> bytes:
     payload = result.get("result", {})
     metrics = payload.get("metrics", {}) if isinstance(payload, dict) else {}
+    metrics_json = json.dumps(metrics, ensure_ascii=False, sort_keys=True, default=str)
     lines = [
         "# Phase 6 Locked Final Test",
         "",
@@ -710,7 +708,7 @@ def _final_markdown(result: dict[str, Any]) -> bytes:
         "",
         "## Metrics",
         "",
-        f"```json\n{json.dumps(metrics, ensure_ascii=False, sort_keys=True, default=str)}\n```",
+        f"```json\n{metrics_json}\n```",
         "",
         *(
             [f"Failure: `{result['error']['type']}: {result['error']['message']}`", ""]

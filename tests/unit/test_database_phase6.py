@@ -887,9 +887,7 @@ def _write_phase5_fixture(data_dir: Path) -> Path:
     empty_dated = dated_safe.iloc[0:0].copy()
     for dataset in ("daily_bar", "adjustment_factor", "daily_status"):
         for year in range(2020, 2026):
-            frames.setdefault(
-                f"{dataset}/year={year}/part.parquet", empty_dated
-            )
+            frames.setdefault(f"{dataset}/year={year}/part.parquet", empty_dated)
     artifacts: list[dict[str, object]] = []
     for name, frame in frames.items():
         path = research / name

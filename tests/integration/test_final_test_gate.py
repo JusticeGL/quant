@@ -64,6 +64,7 @@ def test_dependency_failure_order_is_before_locked_read(
         "exposure",
     ]
     for name in stages:
+
         def validator(*_: object, _name: str = name) -> dict[str, Any]:
             order.append(_name)
             if _name == stage:

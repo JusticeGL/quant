@@ -138,7 +138,9 @@ def validate_pretest_capability(
                 f"{item['domain']}:{item['name']}"
             )
         try:
-            actual_rows = pq.ParquetFile(path).metadata.num_rows
+            actual_rows = pq.ParquetFile(  # type: ignore[no-untyped-call]
+                path
+            ).metadata.num_rows
         except (OSError, ValueError) as error:
             raise ValueError(
                 "pre-test capability artifact is not valid Parquet: "

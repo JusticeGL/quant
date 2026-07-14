@@ -9,7 +9,7 @@ import shutil
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 import duckdb
 import yaml
@@ -690,7 +690,7 @@ def _finite_number(value: object) -> bool:
     )
 
 
-def _nonnegative_int(value: object) -> bool:
+def _nonnegative_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 

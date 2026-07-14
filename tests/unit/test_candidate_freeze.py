@@ -386,8 +386,7 @@ def test_catalog_anchor_corruption_fails_before_safe_parquet(
                 "VALUES (4, 'forged', repeat('0', 64))"
             ),
             "migration_name": (
-                "UPDATE meta.schema_migration SET name = 'forged' "
-                "WHERE version = 2"
+                "UPDATE meta.schema_migration SET name = 'forged' WHERE version = 2"
             ),
             "migration_sha": (
                 "UPDATE meta.schema_migration SET sha256 = repeat('0', 64) "
@@ -401,8 +400,7 @@ def test_catalog_anchor_corruption_fails_before_safe_parquet(
                 "UPDATE meta.dataset_snapshot SET identity_sha256 = repeat('0', 64)"
             ),
             "snapshot_parent": (
-                "UPDATE meta.dataset_snapshot "
-                "SET parent_snapshot_id = 'p5-forged'"
+                "UPDATE meta.dataset_snapshot SET parent_snapshot_id = 'p5-forged'"
             ),
             "artifact_path": (
                 "UPDATE meta.artifact SET relative_path = 'forged.json' "
