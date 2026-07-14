@@ -11,7 +11,7 @@ DATA_END_DATE_ARG = $(if $(END_DATE),--end-date $(END_DATE),)
 PROPOSAL_ARG = $(if $(PROPOSAL),--proposal $(PROPOSAL),)
 PROPOSALS_DIR_ARG = $(if $(PROPOSALS_DIR),--proposals-dir $(PROPOSALS_DIR),)
 
-.PHONY: build shell lock smoke lint test data-bootstrap data-update data-validate qlib-export research-data-probe research-data-bootstrap research-data-update research-data-validate universe-asof db-init db-check baseline factor-list factor-eval mining-round mining-loop report
+.PHONY: build shell lock smoke lint test data-bootstrap data-update data-validate qlib-export research-data-probe research-data-bootstrap research-data-update research-data-validate universe-asof db-init db-check baseline factor-list factor-eval mining-round mining-loop report exposure-probe exposure-bootstrap robustness-freeze robustness-eval test-request test-approve final-test
 
 build:
 	$(COMPOSE) build $(RESEARCH_SERVICE)
@@ -72,6 +72,34 @@ mining-loop:
 
 report:
 	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli mining-report --run $(RUN) --experiments-dir $(EXPERIMENTS_DIR)
+
+exposure-probe:
+	$(COMPOSE) run --rm --build $(DATA_SERVICE) python -m alpha_lab.cli exposure-probe --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR)
+
+exposure-bootstrap:
+	$(COMPOSE) run --rm --build $(DATA_SERVICE) python -m alpha_lab.cli exposure-bootstrap --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR)
+
+robustness-freeze:
+	@test -n "$(ID)" || (echo "ID is required" >&2; exit 2)
+	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli robustness-freeze --id "$(ID)" --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR) --experiments-dir $(EXPERIMENTS_DIR)
+
+robustness-eval:
+	@test -n "$(FREEZE)" || (echo "FREEZE is required" >&2; exit 2)
+	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli robustness-eval --freeze "$(FREEZE)" --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR) --experiments-dir $(EXPERIMENTS_DIR)
+
+test-request:
+	@test -n "$(FREEZE)" || (echo "FREEZE is required" >&2; exit 2)
+	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli test-request --freeze "$(FREEZE)" --experiments-dir $(EXPERIMENTS_DIR)
+
+test-approve:
+	@test -n "$(REQUEST)" || (echo "REQUEST is required" >&2; exit 2)
+	@test -n "$(APPROVER)" || (echo "APPROVER is required" >&2; exit 2)
+	@test -n "$(CONFIRM)" || (echo "CONFIRM is required" >&2; exit 2)
+	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli test-approve --request "$(REQUEST)" --approver "$(APPROVER)" --confirm "$(CONFIRM)" --experiments-dir $(EXPERIMENTS_DIR)
+
+final-test:
+	@test -n "$(APPROVAL)" || (echo "APPROVAL is required" >&2; exit 2)
+	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.cli final-test --approval "$(APPROVAL)" --config-dir $(CONFIG_DIR) --data-dir $(DATA_DIR) --experiments-dir $(EXPERIMENTS_DIR)
 
 smoke:
 	$(COMPOSE) run --rm --build $(RESEARCH_SERVICE) python -m alpha_lab.smoke
