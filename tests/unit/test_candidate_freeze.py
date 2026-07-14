@@ -178,9 +178,7 @@ def test_freeze_pins_candidate_snapshots_policies_boundary_and_git(
     }
     assert document["git_commit"] == _git(freeze_fixture["repo"], "rev-parse", "HEAD")
     assert readers == []
-    assert catalog_reads == [
-        (str(freeze_fixture["data"] / "metadata.duckdb"), True)
-    ]
+    assert catalog_reads == [(str(freeze_fixture["data"] / "metadata.duckdb"), True)]
 
 
 def test_freeze_is_byte_identical_on_repeat(freeze_fixture: dict[str, Path]) -> None:
@@ -387,18 +385,25 @@ def test_catalog_anchor_corruption_fails_before_safe_parquet(
                 "INSERT INTO meta.schema_migration (version, name, sha256) "
                 "VALUES (4, 'forged', repeat('0', 64))"
             ),
-            "migration_name": "UPDATE meta.schema_migration SET name = 'forged' WHERE version = 2",
+            "migration_name": (
+                "UPDATE meta.schema_migration SET name = 'forged' "
+                "WHERE version = 2"
+            ),
             "migration_sha": (
                 "UPDATE meta.schema_migration SET sha256 = repeat('0', 64) "
                 "WHERE version = 2"
             ),
-            "snapshot_type": "UPDATE meta.dataset_snapshot SET snapshot_type = 'forged'",
+            "snapshot_type": (
+                "UPDATE meta.dataset_snapshot SET snapshot_type = 'forged'"
+            ),
             "snapshot_status": "UPDATE meta.dataset_snapshot SET status = 'invalid'",
             "snapshot_identity": (
-                "UPDATE meta.dataset_snapshot "
-                "SET identity_sha256 = repeat('0', 64)"
+                "UPDATE meta.dataset_snapshot SET identity_sha256 = repeat('0', 64)"
             ),
-            "snapshot_parent": "UPDATE meta.dataset_snapshot SET parent_snapshot_id = 'p5-forged'",
+            "snapshot_parent": (
+                "UPDATE meta.dataset_snapshot "
+                "SET parent_snapshot_id = 'p5-forged'"
+            ),
             "artifact_path": (
                 "UPDATE meta.artifact SET relative_path = 'forged.json' "
                 "WHERE dataset_name = 'meta.pretest_data_capability'"
@@ -423,7 +428,9 @@ def test_catalog_anchor_corruption_fails_before_safe_parquet(
                 "UPDATE meta.snapshot_artifact SET dataset_name = 'meta.forged' "
                 "WHERE dataset_name = 'meta.pretest_data_capability'"
             ),
-            "quality_status": "UPDATE meta.dataset_snapshot SET quality_status = 'warning'",
+            "quality_status": (
+                "UPDATE meta.dataset_snapshot SET quality_status = 'warning'"
+            ),
             "quality_result_status": (
                 "UPDATE meta.quality_result SET status = 'fail' "
                 "WHERE dataset_name = 'research.exposure_snapshot'"
@@ -450,15 +457,83 @@ def test_catalog_anchor_corruption_fails_before_safe_parquet(
                 "WHERE dataset_name = 'research.exposure_snapshot'"
             ),
         }
-        with duckdb.connect(str(database)) as connection:
-            if corruption == "artifact_nonunique":
+        if corruption == "snapshot_status":
+            with duckdb.connect(str(database)) as connection:
+                snapshot_id = connection.execute(
+                    """
+                    SELECT snapshot_id FROM meta.dataset_snapshot
+                    WHERE snapshot_type = 'point_in_time_exposure'
+                    """
+                ).fetchone()[0]
+                artifact_links = connection.execute(
+                    "SELECT * FROM meta.snapshot_artifact WHERE snapshot_id = ?",
+                    [snapshot_id],
+                ).fetchall()
+                quality_rows = connection.execute(
+                    "SELECT * FROM meta.quality_result WHERE snapshot_id = ?",
+                    [snapshot_id],
+                ).fetchall()
+                connection.execute(
+                    "DELETE FROM meta.snapshot_artifact WHERE snapshot_id = ?",
+                    [snapshot_id],
+                )
+                connection.execute(
+                    "DELETE FROM meta.quality_result WHERE snapshot_id = ?",
+                    [snapshot_id],
+                )
+            with duckdb.connect(str(database)) as connection:
+                connection.execute(
+                    "UPDATE meta.dataset_snapshot SET status = 'invalid' "
+                    "WHERE snapshot_id = ?",
+                    [snapshot_id],
+                )
+            with duckdb.connect(str(database)) as connection:
+                connection.executemany(
+                    "INSERT INTO meta.snapshot_artifact VALUES (?, ?, ?)",
+                    artifact_links,
+                )
+                connection.executemany(
+                    "INSERT INTO meta.quality_result VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    quality_rows,
+                )
+        elif corruption in {
+            "artifact_path",
+            "artifact_sha",
+            "artifact_dataset_name",
+        }:
+            with duckdb.connect(str(database)) as connection:
+                artifact_id = connection.execute(
+                    """
+                    SELECT artifact_id FROM meta.artifact
+                    WHERE dataset_name = 'meta.pretest_data_capability'
+                    """
+                ).fetchone()[0]
+                artifact_links = connection.execute(
+                    "SELECT * FROM meta.snapshot_artifact WHERE artifact_id = ?",
+                    [artifact_id],
+                ).fetchall()
+                connection.execute(
+                    "DELETE FROM meta.snapshot_artifact WHERE artifact_id = ?",
+                    [artifact_id],
+                )
+            with duckdb.connect(str(database)) as connection:
+                connection.execute(statements[corruption])
+            with duckdb.connect(str(database)) as connection:
+                connection.executemany(
+                    "INSERT INTO meta.snapshot_artifact VALUES (?, ?, ?)",
+                    artifact_links,
+                )
+        elif corruption == "artifact_nonunique":
+            with duckdb.connect(str(database)) as connection:
                 connection.execute(
                     """
                     INSERT INTO meta.artifact
                         (artifact_id, layer, dataset_name, relative_path, format,
                          sha256, schema_version, immutable)
-                    SELECT repeat('f', 64), layer, dataset_name, relative_path,
-                           format, sha256, schema_version, immutable
+                    SELECT repeat('f', 64), layer, dataset_name,
+                           'manifests/forged/pretest_capability.json', format,
+                           sha256, schema_version, immutable
                     FROM meta.artifact
                     WHERE dataset_name = 'meta.pretest_data_capability'
                     """
@@ -473,7 +548,8 @@ def test_catalog_anchor_corruption_fails_before_safe_parquet(
                     WHERE snapshot_type = 'point_in_time_exposure'
                     """
                 )
-            else:
+        else:
+            with duckdb.connect(str(database)) as connection:
                 connection.execute(statements[corruption])
     real_open = Path.open
 
@@ -1003,10 +1079,7 @@ def _write_exposure_snapshot(
     exposure_names.extend(
         f"market_cap/year={year}/part.parquet" for year in range(2020, 2026)
     )
-    artifact_identities = [
-        _artifact_identity(name)
-        for name in exposure_names
-    ]
+    artifact_identities = [_artifact_identity(name) for name in exposure_names]
     coverage_scope = {
         "start_date": "2020-01-01",
         "end_date": "2026-07-11",
@@ -1269,9 +1342,7 @@ def _coherently_resign_false_quality(
         target["row_count"] += delta
     capability["quality"]["summary"]["row_count"] += delta
     summary_key = (
-        "phase5_row_count"
-        if target["domain"] == "phase5"
-        else "exposure_row_count"
+        "phase5_row_count" if target["domain"] == "phase5" else "exposure_row_count"
     )
     capability["quality"]["summary"][summary_key] += delta
     identity = {
@@ -1279,9 +1350,7 @@ def _coherently_resign_false_quality(
         for key, value in capability.items()
         if key not in {"capability_id", "identity_sha256"}
     }
-    capability_identity = hashlib.sha256(
-        _canonical_json_bytes(identity)
-    ).hexdigest()
+    capability_identity = hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
     capability["identity_sha256"] = capability_identity
     capability["capability_id"] = f"pretest-{capability_identity[:20]}"
     capability_content = _canonical_json_bytes(capability)
@@ -1355,9 +1424,7 @@ def _write_catalog_anchor(data_dir: Path, manifest_path: Path) -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     reference = manifest["pretest_capability"]
     relative_path = (
-        Path("manifests")
-        / manifest["snapshot_id"]
-        / "pretest_capability.json"
+        Path("manifests") / manifest["snapshot_id"] / "pretest_capability.json"
     ).as_posix()
     artifact_id = hashlib.sha256(
         f"report|{relative_path}|{reference['sha256']}".encode()

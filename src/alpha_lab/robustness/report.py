@@ -253,6 +253,7 @@ def _write_json_immutable(path: Path, value: object) -> None:
     content = (
         json.dumps(
             value,
+            allow_nan=False,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

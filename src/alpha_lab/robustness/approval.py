@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -13,8 +14,10 @@ import duckdb
 import yaml
 
 from alpha_lab.database import catalog
+from alpha_lab.evaluation.config import load_evaluation_config
 from alpha_lab.factors.contract import FactorMetadata
 from alpha_lab.robustness.config import load_robustness_config
+from alpha_lab.robustness.freeze import validate_freeze
 from alpha_lab.robustness.report import _markdown
 from alpha_lab.robustness.walk_forward import evaluate_gates
 
@@ -43,6 +46,8 @@ _EXECUTION_CONFIGS = (
 _EXECUTION_MODULES = (
     "src/alpha_lab/baseline/backtest.py",
     "src/alpha_lab/baseline/config.py",
+    "src/alpha_lab/data/normalize.py",
+    "src/alpha_lab/database/catalog.py",
     "src/alpha_lab/evaluation/config.py",
     "src/alpha_lab/evaluation/metrics.py",
     "src/alpha_lab/factors/contract.py",
@@ -56,14 +61,19 @@ _EXECUTION_MODULES = (
     "src/alpha_lab/robustness/report.py",
     "src/alpha_lab/robustness/walk_forward.py",
 )
+_EXECUTION_RESOURCES = (
+    "src/alpha_lab/database/sql/001_initial.sql",
+    "src/alpha_lab/database/sql/002_research_data.sql",
+    "src/alpha_lab/database/sql/003_robustness.sql",
+)
 
 
 def create_test_request(freeze_path: Path) -> Path:
     freeze_dir = freeze_path.parent
     if freeze_dir.is_symlink():
         raise ValueError("freeze directory is untrusted")
-    freeze = _read_canonical_json(freeze_path, "freeze")
     repo_root = freeze_path.parents[3]
+    freeze = validate_freeze(freeze_path, repo_root / "config", repo_root / "data")
     if freeze_path.name != "freeze.json" or freeze.get("freeze_id") != freeze_dir.name:
         raise ValueError("freeze layout or identity is invalid")
     expected_freeze = (
@@ -103,7 +113,9 @@ def create_test_request(freeze_path: Path) -> Path:
     document = {**identity, "request_id": f"request-{digest}"}
     path = freeze_dir / "test_request.json"
     _write_immutable(path, canonical_bytes(document), "test request")
-    _register_test_request(repo_root / "data" / "metadata.duckdb", freeze, document, path)
+    _register_test_request(
+        repo_root / "data" / "metadata.duckdb", freeze, document, path
+    )
     return path
 
 
@@ -257,6 +269,7 @@ def canonical_bytes(value: object) -> bytes:
     return (
         json.dumps(
             value,
+            allow_nan=False,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -274,7 +287,11 @@ def _read_canonical_json(path: Path, label: str) -> dict[str, Any]:
         value = json.loads(content)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"{label} is malformed") from error
-    if not isinstance(value, dict) or content != canonical_bytes(value):
+    try:
+        canonical = canonical_bytes(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{label} contains unsupported values") from error
+    if not isinstance(value, dict) or content != canonical:
         raise ValueError(f"{label} is not canonical JSON")
     return value
 
@@ -347,6 +364,12 @@ def _validate_robustness_artifacts(
     exposure = _read_canonical_json(
         freeze_dir / "exposure_report.json", "exposure report"
     )
+    for label, document in (
+        ("walk-forward", walk),
+        ("cost sensitivity", costs),
+        ("exposure report", exposure),
+    ):
+        _require_finite_numbers(document, label)
     common_keys = {
         "schema_version",
         "freeze_id",
@@ -365,7 +388,10 @@ def _validate_robustness_artifacts(
     if set(exposure) != common_keys | {"size", "industry", "missing"}:
         raise ValueError("exposure report schema is invalid")
     common = {key: walk[key] for key in common_keys}
-    if any({key: document[key] for key in common_keys} != common for document in (costs, exposure)):
+    if any(
+        {key: document[key] for key in common_keys} != common
+        for document in (costs, exposure)
+    ):
         raise ValueError("robustness report dependency linkage is inconsistent")
     factor = freeze.get("factor", {})
     snapshots = freeze.get("snapshots", {})
@@ -382,10 +408,10 @@ def _validate_robustness_artifacts(
         or common["freeze_id"] != freeze.get("freeze_id")
         or common["freeze_sha256"] != freeze_sha256
         or common["factor_id"] != factor.get("factor_id")
-        or common["robustness_policy_sha256"]
-        != policies["robustness"]["sha256"]
+        or common["robustness_policy_sha256"] != policies["robustness"]["sha256"]
         or common["dependencies"] != expected_dependencies
-        or not _sha(common["evaluation_policy_sha256"])
+        or common["evaluation_policy_sha256"]
+        != load_evaluation_config(config_dir / "factor_evaluation.yaml")[1]
         or common["orientation"]
         != {
             "candidate_direction": -1,
@@ -418,40 +444,118 @@ def _validate_robustness_artifacts(
         "direction_consistent",
     }
     for actual, expected in zip(folds, expected_folds, strict=True):
+        input_rows = actual.get("input_row_count") if isinstance(actual, dict) else None
+        valid_rows = actual.get("valid_row_count") if isinstance(actual, dict) else None
+        expected_coverage = (
+            float(valid_rows / input_rows)
+            if _nonnegative_int(input_rows)
+            and _nonnegative_int(valid_rows)
+            and input_rows > 0
+            and valid_rows <= input_rows
+            else None
+        )
         if (
             not isinstance(actual, dict)
             or set(actual) != fold_keys
             or actual["fold_id"] != expected.fold_id
             or actual["start"] != expected.start.isoformat()
             or actual["end"] != expected.end.isoformat()
-            or not isinstance(actual["coverage"], (int, float))
-            or not 0 <= float(actual["coverage"]) <= 1
+            or expected_coverage is None
+            or not _finite_number(actual["coverage"])
+            or not math.isclose(
+                float(actual["coverage"]), expected_coverage, rel_tol=0.0, abs_tol=1e-15
+            )
+            or any(
+                actual[key] is not None and not _finite_number(actual[key])
+                for key in (
+                    "mean_ic",
+                    "mean_rank_ic",
+                    "icir",
+                    "rank_icir",
+                    "factor_turnover",
+                )
+            )
+            or not isinstance(actual["group_returns"], dict)
+            or not actual["group_returns"]
+            or any(
+                not isinstance(key, str)
+                or not key.isdigit()
+                or not _finite_number(value)
+                for key, value in actual["group_returns"].items()
+            )
             or actual["direction_consistent"]
-            is not (actual["mean_rank_ic"] is not None and float(actual["mean_rank_ic"]) > 0)
+            is not (
+                actual["mean_rank_ic"] is not None and float(actual["mean_rank_ic"]) > 0
+            )
         ):
             raise ValueError("walk-forward fold diagnostics are invalid")
     scenarios = costs["scenarios"]
     expected_scenarios = {str(float(value)) for value in config.cost_multipliers}
     if not isinstance(scenarios, dict) or set(scenarios) != expected_scenarios:
         raise ValueError("cost-sensitivity scenarios are invalid")
+    metric_keys = {
+        "initial_cash",
+        "final_nav",
+        "total_return",
+        "annualized_return",
+        "annualized_volatility",
+        "sharpe",
+        "max_drawdown",
+        "trade_count",
+        "total_fees",
+        "turnover_ratio",
+    }
+    constraint_keys = {
+        "blocked_suspend",
+        "blocked_limit",
+        "blocked_st",
+        "blocked_unknown_status",
+        "blocked_t_plus_one",
+        "blocked_lot_or_cash",
+        "inferred_price_limit_checks",
+    }
     for scenario in scenarios.values():
         if (
             not isinstance(scenario, dict)
             or set(scenario) != {"metrics", "folds"}
             or not isinstance(scenario["metrics"], dict)
-            or "total_return" not in scenario["metrics"]
+            or set(scenario["metrics"]) != {"total_return"}
+            or not _finite_number(scenario["metrics"]["total_return"])
             or not isinstance(scenario["folds"], list)
             or any(
                 not isinstance(item, dict)
                 or set(item) != {"fold_id", "metrics", "constraints"}
                 or not isinstance(item["metrics"], dict)
+                or set(item["metrics"]) != metric_keys
+                or any(
+                    value is not None and not _finite_number(value)
+                    for value in item["metrics"].values()
+                )
                 or not isinstance(item["constraints"], dict)
+                or set(item["constraints"]) != constraint_keys
+                or any(
+                    not _nonnegative_int(value)
+                    for value in item["constraints"].values()
+                )
                 for item in scenario["folds"]
             )
             or [item.get("fold_id") for item in scenario["folds"]]
             != [fold.fold_id for fold in expected_folds]
         ):
             raise ValueError("cost-sensitivity diagnostics are invalid")
+        aggregate = 1.0
+        for item in scenario["folds"]:
+            total_return = item["metrics"]["total_return"]
+            if not _finite_number(total_return):
+                raise ValueError("cost-sensitivity fold return is invalid")
+            aggregate *= 1.0 + float(total_return)
+        if not math.isclose(
+            float(scenario["metrics"]["total_return"]),
+            aggregate - 1.0,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("cost-sensitivity aggregate is inconsistent")
     if not isinstance(exposure["industry"], dict) or set(exposure["industry"]) != {
         "joined_rows",
         "original_joined_rows",
@@ -479,6 +583,7 @@ def _validate_robustness_artifacts(
         "industry_rows",
     }:
         raise ValueError("exposure diagnostics are invalid")
+    _validate_exposure_details(exposure)
     derived = evaluate_gates(folds, costs, exposure, config)
     if (
         walk["gates"] != derived
@@ -490,6 +595,117 @@ def _validate_robustness_artifacts(
     if markdown.read_bytes() != _markdown(walk, exposure):
         raise ValueError("robustness Markdown is not derived from bound reports")
     return derived
+
+
+def _validate_exposure_details(exposure: dict[str, Any]) -> None:
+    size = exposure["size"]
+    industry = exposure["industry"]
+    missing = exposure["missing"]
+    if (
+        not all(_nonnegative_int(size[key]) for key in ("joined_rows",))
+        or not all(
+            _nonnegative_int(missing[key]) for key in ("size_rows", "industry_rows")
+        )
+        or size["uses"] != "log(total_market_cap_cny)"
+        or size["method"] != "daily_cross_sectional_spearman"
+        or not _finite_number(size["risk_threshold"])
+        or size["correlation"] is not None
+        and not _finite_number(size["correlation"])
+        or size["risk_flag"]
+        is not (
+            size["correlation"] is not None
+            and abs(float(size["correlation"])) > float(size["risk_threshold"])
+        )
+        or not isinstance(size["daily"], list)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"date", "correlation", "count"}
+            or not isinstance(item["date"], str)
+            or not _finite_number(item["correlation"])
+            or not _nonnegative_int(item["count"])
+            for item in size["daily"]
+        )
+        or not isinstance(size["yearly"], dict)
+        or any(
+            not str(key).isdigit() or not _finite_number(value)
+            for key, value in size["yearly"].items()
+        )
+    ):
+        raise ValueError("size exposure diagnostics are invalid")
+    numeric_optional = (
+        "original_rank_ic",
+        "neutral_rank_ic",
+        "abs_rank_ic_retention",
+        "mean_score_dispersion",
+    )
+    if (
+        not all(
+            _nonnegative_int(industry[key])
+            for key in ("joined_rows", "original_joined_rows", "minimum_group_size")
+        )
+        or industry["joined_rows"] != industry["original_joined_rows"]
+        or any(
+            industry[key] is not None and not _finite_number(industry[key])
+            for key in numeric_optional
+        )
+        or not isinstance(industry["by_industry"], list)
+        or any(
+            not isinstance(item, dict)
+            or set(item) != {"industry_id", "mean_score", "observations"}
+            or not isinstance(item["industry_id"], str)
+            or not item["industry_id"]
+            or not _finite_number(item["mean_score"])
+            or not _nonnegative_int(item["observations"])
+            for item in industry["by_industry"]
+        )
+    ):
+        raise ValueError("industry exposure diagnostics are invalid")
+    original = industry["original_rank_ic"]
+    neutral = industry["neutral_rank_ic"]
+    expected_retention = (
+        abs(float(neutral)) / abs(float(original))
+        if original not in (None, 0.0) and neutral is not None
+        else None
+    )
+    actual_retention = industry["abs_rank_ic_retention"]
+    if (
+        expected_retention is None
+        and actual_retention is not None
+        or expected_retention is not None
+        and (
+            actual_retention is None
+            or not math.isclose(
+                float(actual_retention),
+                expected_retention,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+        )
+    ):
+        raise ValueError("industry-neutral retention is inconsistent")
+
+
+def _require_finite_numbers(value: object, label: str) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{label} contains a non-finite number")
+    if isinstance(value, dict):
+        for item in value.values():
+            _require_finite_numbers(item, label)
+    elif isinstance(value, list):
+        for item in value:
+            _require_finite_numbers(item, label)
+
+
+def _finite_number(value: object) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    )
+
+
+def _nonnegative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _execution_bundle(repo_root: Path, freeze: dict[str, Any]) -> dict[str, Any]:
@@ -516,13 +732,21 @@ def _execution_bundle(repo_root: Path, freeze: dict[str, Any]) -> dict[str, Any]
         name: _sha256(_required_regular_file(repo_root / name, repo_root))
         for name in sorted(set(paths))
     }
-    return {"configs": config, "code": code}
+    resources = {
+        name: _sha256(_required_regular_file(repo_root / name, repo_root))
+        for name in _EXECUTION_RESOURCES
+    }
+    return {"configs": config, "code": code, "resources": resources}
 
 
 def _validate_execution_bundle_schema(value: object) -> None:
-    if not isinstance(value, dict) or set(value) != {"configs", "code"}:
+    if not isinstance(value, dict) or set(value) != {
+        "configs",
+        "code",
+        "resources",
+    }:
         raise ValueError("test request execution bundle is invalid")
-    for section in ("configs", "code"):
+    for section in ("configs", "code", "resources"):
         items = value[section]
         if (
             not isinstance(items, dict)
@@ -535,9 +759,7 @@ def _validate_execution_bundle_schema(value: object) -> None:
             raise ValueError("test request execution bundle is invalid")
 
 
-def validate_execution_bundle_files(
-    request: dict[str, Any], repo_root: Path
-) -> None:
+def validate_execution_bundle_files(request: dict[str, Any], repo_root: Path) -> None:
     bundle = request["execution_bundle"]
     _validate_execution_bundle_schema(bundle)
     expected_configs = {f"config/{name}" for name in _EXECUTION_CONFIGS}
@@ -545,7 +767,9 @@ def validate_execution_bundle_files(
         raise ValueError("test request execution config bundle is incomplete")
     if not set(_EXECUTION_MODULES).issubset(bundle["code"]):
         raise ValueError("test request execution code bundle is incomplete")
-    for section in ("configs", "code"):
+    if set(bundle["resources"]) != set(_EXECUTION_RESOURCES):
+        raise ValueError("test request execution resource bundle is incomplete")
+    for section in ("configs", "code", "resources"):
         for relative, expected_sha256 in bundle[section].items():
             path = _required_regular_file(repo_root / relative, repo_root)
             if _sha256(path) != expected_sha256:
@@ -561,7 +785,9 @@ def _register_test_request(
     factor = freeze["factor"]
     repo_root = request_path.parents[3]
     metadata = FactorMetadata.model_validate(
-        yaml.safe_load((repo_root / factor["metadata_path"]).read_text(encoding="utf-8"))
+        yaml.safe_load(
+            (repo_root / factor["metadata_path"]).read_text(encoding="utf-8")
+        )
     )
     version_id = f"{factor['factor_id']}-{str(factor['source_sha256'])[:20]}"
     with catalog._catalog_write_lock(database_path):
@@ -688,7 +914,9 @@ def _register_test_request(
                         _sha256(request_path),
                         request["freeze_id"],
                         request["freeze_sha256"],
-                        request["robustness_artifacts"]["robustness_report.md"]["sha256"],
+                        request["robustness_artifacts"]["robustness_report.md"][
+                            "sha256"
+                        ],
                         request["locked_test"]["start"],
                         request["locked_test"]["end"],
                     ],

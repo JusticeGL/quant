@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import copy
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from alpha_lab.baseline.config import CostConfig, CostRule
 from alpha_lab.robustness.config import WalkForwardFold, load_robustness_config
@@ -111,6 +113,38 @@ def test_gate_boundaries_are_exact_and_size_risk_is_not_a_gate() -> None:
         evaluate_gates(folds, costs, exposures, config)["double_cost_direction"]
         is False
     )
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+def test_all_gate_inputs_reject_non_finite_values(invalid: float) -> None:
+    config, _ = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    valid_folds = [
+        {"direction_consistent": index < 4, "coverage": 0.70} for index in range(5)
+    ]
+    valid_costs = {
+        "scenarios": {
+            "1.0": {"metrics": {"total_return": 0.01}},
+            "2.0": {"metrics": {"total_return": 0.005}},
+        }
+    }
+    valid_exposures = {"industry": {"abs_rank_ic_retention": 0.50}}
+
+    costs = copy.deepcopy(valid_costs)
+    costs["scenarios"]["2.0"]["metrics"]["total_return"] = invalid
+    assert not evaluate_gates(valid_folds, costs, valid_exposures, config)[
+        "double_cost_direction"
+    ]
+
+    folds = [dict(item) for item in valid_folds]
+    folds[0]["coverage"] = invalid
+    assert not evaluate_gates(folds, valid_costs, valid_exposures, config)[
+        "fold_coverage"
+    ]
+
+    exposures = {"industry": {"abs_rank_ic_retention": invalid}}
+    assert not evaluate_gates(valid_folds, valid_costs, exposures, config)[
+        "industry_neutral_retention"
+    ]
 
 
 def test_backtest_predictions_require_fold_local_entry_exit_and_label() -> None:

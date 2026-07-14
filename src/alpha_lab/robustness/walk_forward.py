@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -91,10 +92,16 @@ def evaluate_gates(
 ) -> dict[str, bool]:
     """Apply only the four approved Phase 6 pre-test gates."""
     consistent = sum(item.get("direction_consistent") is True for item in folds)
-    coverage = all(
-        float(item.get("coverage", 0.0)) >= config.minimum_fold_coverage
-        for item in folds
-    ) and len(folds) == len(config.walk_forward_folds)
+    coverage_values = [_finite_float(item.get("coverage")) for item in folds]
+    coverage = (
+        len(folds) == len(config.walk_forward_folds)
+        and all(value is not None for value in coverage_values)
+        and all(
+            value >= config.minimum_fold_coverage
+            for value in coverage_values
+            if value is not None
+        )
+    )
     base_return = _scenario_total_return(cost_sensitivity, 1.0)
     double_return = _scenario_total_return(cost_sensitivity, 2.0)
     no_reversal = (
@@ -105,14 +112,16 @@ def evaluate_gates(
             or (base_return < 0.0 and double_return >= 0.0)
         )
     )
-    retention = exposures.get("industry", {}).get("abs_rank_ic_retention")
+    retention = _finite_float(
+        exposures.get("industry", {}).get("abs_rank_ic_retention")
+    )
     return {
         "direction_consistency": consistent
         >= config.minimum_direction_consistent_folds,
         "fold_coverage": coverage,
         "double_cost_direction": no_reversal,
         "industry_neutral_retention": retention is not None
-        and float(retention) >= config.minimum_industry_neutral_ic_retention,
+        and retention >= config.minimum_industry_neutral_ic_retention,
     }
 
 
@@ -123,5 +132,15 @@ def _scenario_total_return(report: dict[str, Any], multiplier: float) -> float |
         if isinstance(value, dict):
             metrics = value.get("metrics", value)
             result = metrics.get("total_return") if isinstance(metrics, dict) else None
-            return None if result is None else float(result)
+            return _finite_float(result)
     return None
+
+
+def _finite_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        result = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
