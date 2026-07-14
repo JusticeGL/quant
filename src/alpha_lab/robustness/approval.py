@@ -543,6 +543,10 @@ def _validate_robustness_artifacts(
         ):
             raise ValueError("cost-sensitivity aggregate is inconsistent")
     if not isinstance(exposure["industry"], dict) or set(exposure["industry"]) != {
+        "input_rows",
+        "matched_rows",
+        "excluded_rows",
+        "coverage",
         "joined_rows",
         "original_joined_rows",
         "original_rank_ic",
@@ -627,7 +631,26 @@ def _validate_exposure_details(exposure: dict[str, Any]) -> None:
     if (
         not all(
             _nonnegative_int(industry[key])
-            for key in ("joined_rows", "original_joined_rows", "minimum_group_size")
+            for key in (
+                "input_rows",
+                "matched_rows",
+                "excluded_rows",
+                "joined_rows",
+                "original_joined_rows",
+                "minimum_group_size",
+            )
+        )
+        or not _finite_number(industry["coverage"])
+        or not 0 <= float(industry["coverage"]) <= 1
+        or industry["excluded_rows"]
+        != industry["input_rows"] - industry["matched_rows"]
+        or not math.isclose(
+            float(industry["coverage"]),
+            industry["matched_rows"] / industry["input_rows"]
+            if industry["input_rows"]
+            else 1.0,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
         )
         or industry["joined_rows"] != industry["original_joined_rows"]
         or any(

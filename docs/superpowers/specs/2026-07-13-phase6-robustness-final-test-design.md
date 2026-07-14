@@ -37,6 +37,17 @@ industries. Industry membership requires
   securities, or inadequate coverage stop publication.
 - Current industry values are never used to backfill history.
 
+On 2026-07-14 the user explicitly approved a minimum 98% industry-observation
+coverage policy for the historical pre-test input. Coverage is measured over
+the Phase 5 expected `(trade_date, security_id)` observations by point-in-time
+interval matching, including `known_at`; it is not an entity-ever-mapped
+ratio. Missing securities and observations are deterministic warnings when the
+ratio remains at least 98%, while a ratio below 98% is an error and prevents
+publication. Empty L1 responses remain explicit information, and duplicate,
+overlap, unknown-reference, and market-cap gates are unchanged. Unmatched rows
+remain in factor and cost evaluation but are excluded from industry-neutral
+diagnostics.
+
 Task 2 also publishes canonical
 `manifests/<p6x-id>/pretest_capability.json`. Its content deliberately contains
 no p6x ID or p6x path, so its content-derived identity can be referenced by the

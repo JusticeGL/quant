@@ -74,6 +74,16 @@ coverage, checksum, and quality validation. `exposure-bootstrap` then syncs the
 validated manifest into `data/metadata.duckdb`; a freeze cannot trust an
 uncataloged capability.
 
+Historical industry coverage has a user-approved minimum of 98%. It is
+calculated over every expected Phase 5 `(trade_date, security_id)` observation
+using membership intervals valid and known on that date. Missing industry
+securities and observations are reported as deterministic warnings at or above
+the threshold; below it publication fails closed. Such observations still take
+part in factor and cost evaluation, but are explicitly excluded from the
+industry-neutral calculation. Empty L1 responses are disclosed separately as
+information; duplicate, overlap, unknown-reference, and market-cap checks are
+not relaxed.
+
 ## Evidence and warning semantics
 
 Robustness evaluation computes the candidate once and uses the fixed five folds.

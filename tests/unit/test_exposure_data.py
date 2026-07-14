@@ -325,6 +325,153 @@ def test_quality_rejects_severe_temporal_gaps_despite_every_entity_present() -> 
     assert report["checks"]["undercovered_security"]["count"] == 2
 
 
+def test_industry_observation_coverage_uses_point_in_time_intervals_at_boundary() -> (
+    None
+):
+    observations = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2021-01-01", "2021-01-02"]),
+            "security_id": ["CN:SSE:600000", "CN:SSE:600000"],
+        }
+    )
+    tables = ExposureTables(
+        market_cap=normalize_market_cap(
+            pd.DataFrame(
+                [["600000.SH", "20210101", 1, 1], ["600000.SH", "20210102", 1, 1]],
+                columns=DAILY_BASIC_FIELDS,
+            )
+        ),
+        industry_definition=normalize_industry_definition(_definition_raw()),
+        industry_membership=normalize_industry_membership(
+            pd.DataFrame(
+                [
+                    {
+                        **{field: "" for field in INDUSTRY_MEMBER_FIELDS},
+                        "l1_code": "801010.SI",
+                        "ts_code": "600000.SH",
+                        "in_date": "20210102",
+                    }
+                ]
+            ),
+            {"801010.SI"},
+        ),
+    )
+
+    report = validate_exposure_tables(
+        tables,
+        {"CN:SSE:600000"},
+        expected_market_observations=observations,
+        minimum_industry_observation_coverage=0.5,
+    )
+
+    assert report["status"] == "warning"
+    assert report["summary"]["industry_expected_observation_count"] == 2
+    assert report["summary"]["industry_matched_observation_count"] == 1
+    assert report["summary"]["industry_observation_coverage_ratio"] == 0.5
+    assert report["checks"]["insufficient_industry_observation_coverage"]["count"] == 0
+
+
+def test_industry_observation_coverage_below_threshold_fails_closed() -> None:
+    observations = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2021-01-01", "2021-01-02"]),
+            "security_id": ["CN:SSE:600000", "CN:SSE:600000"],
+        }
+    )
+    tables = ExposureTables(
+        market_cap=normalize_market_cap(
+            pd.DataFrame(
+                [["600000.SH", "20210101", 1, 1], ["600000.SH", "20210102", 1, 1]],
+                columns=DAILY_BASIC_FIELDS,
+            )
+        ),
+        industry_definition=normalize_industry_definition(_definition_raw()),
+        industry_membership=normalize_industry_membership(
+            pd.DataFrame(
+                [
+                    {
+                        **{field: "" for field in INDUSTRY_MEMBER_FIELDS},
+                        "l1_code": "801010.SI",
+                        "ts_code": "600000.SH",
+                        "in_date": "20210102",
+                    }
+                ]
+            ),
+            {"801010.SI"},
+        ),
+    )
+
+    report = validate_exposure_tables(
+        tables,
+        {"CN:SSE:600000"},
+        expected_market_observations=observations,
+        minimum_industry_observation_coverage=0.500001,
+    )
+
+    assert report["status"] == "error"
+    assert report["checks"]["insufficient_industry_observation_coverage"]["count"] == 1
+    assert report["summary"]["missing_industry_security_ids"] == ["CN:SSE:600000"]
+
+
+def test_approved_real_shape_warns_for_missing_industry_above_98_percent() -> None:
+    security_ids = [f"CN:SSE:{value:06d}" for value in range(100)]
+    dates = pd.date_range("2021-01-01", periods=10, freq="D")
+    observations = pd.DataFrame(
+        [
+            {"trade_date": trade_date, "security_id": security_id}
+            for trade_date in dates
+            for security_id in security_ids
+        ]
+    )
+    market = pd.DataFrame(
+        [
+            [f"{value:06d}.SH", trade_date.strftime("%Y%m%d"), 1, 1]
+            for trade_date in dates
+            for value in range(100)
+        ],
+        columns=DAILY_BASIC_FIELDS,
+    )
+    membership = pd.DataFrame(
+        [
+            {
+                **{field: "" for field in INDUSTRY_MEMBER_FIELDS},
+                "l1_code": "801010.SI",
+                "ts_code": f"{value:06d}.SH",
+                "in_date": "20200101",
+            }
+            for value in range(99)
+        ]
+    )
+    tables = ExposureTables(
+        normalize_market_cap(market),
+        normalize_industry_definition(_definition_raw()),
+        normalize_industry_membership(membership, {"801010.SI"}),
+    )
+
+    report = validate_exposure_tables(
+        tables,
+        set(security_ids),
+        expected_security_ids=set(security_ids),
+        expected_market_observations=observations,
+        minimum_temporal_coverage=1.0,
+        minimum_industry_observation_coverage=0.98,
+    )
+
+    assert report["status"] == "warning"
+    assert report["summary"]["industry_expected_observation_count"] == 1000
+    assert report["summary"]["industry_matched_observation_count"] == 990
+    assert report["summary"]["industry_missing_observation_count"] == 10
+    assert report["summary"]["industry_observation_coverage_ratio"] == 0.99
+    assert report["summary"]["missing_industry_security_count"] == 1
+    assert report["summary"]["missing_industry_security_ids"] == ["CN:SSE:000099"]
+    assert report["checks"]["missing_industry_observations"] == {
+        "severity": "warning",
+        "status": "fail",
+        "count": 10,
+    }
+    assert report["checks"]["insufficient_industry_observation_coverage"]["count"] == 0
+
+
 def test_provider_row_limit_is_rejected() -> None:
     raw = pd.DataFrame(
         {
@@ -784,6 +931,8 @@ class _AcquisitionFakeProvider:
                 return _membership_raw().assign(
                     l1_code=l1_code,
                     ts_code=("600000.SH" if l1_code == "801010.SI" else "600001.SH"),
+                    in_date="20200101",
+                    out_date="",
                 )
             ts_code = str(params["ts_code"])
             return _membership_raw().assign(
@@ -791,6 +940,8 @@ class _AcquisitionFakeProvider:
                 l1_name="",
                 l2_code=("110100" if ts_code == "600000.SH" else "120100"),
                 ts_code=ts_code,
+                in_date="20200101",
+                out_date="",
             )
         if api_name == "daily_basic":
             if (

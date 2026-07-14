@@ -200,6 +200,11 @@ Phase 6 先构建并登记独立的 `p6x-*` 时点暴露快照，再分别冻结
 停在人工审批点。批准必须指定 request、人工身份和 freeze SHA256，最终测试还必须显式
 指定对应 approval。设计或代码变更的批准不等同于最终测试批准。
 
+历史行业覆盖按 Phase 5 每个预期 `(trade_date, security_id)` 与当日已知的行业区间计算，
+最低门槛为已明确批准的 98%。达到门槛时缺失证券和观测以 warning 明示，未匹配行仍参与
+因子和成本评估、但从行业中性诊断排除；低于门槛则拒绝发布快照。其他重复、区间重叠、
+未知引用和市值质量门槛不变。
+
 ```bash
 make exposure-probe
 make exposure-bootstrap

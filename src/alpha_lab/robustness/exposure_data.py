@@ -248,10 +248,13 @@ def normalize_industry_membership_backfill(
     *,
     expected_ts_code: str,
     row_limit: int = INDUSTRY_MEMBER_ROW_LIMIT,
+    allow_empty: bool = False,
 ) -> pd.DataFrame:
     _require_fields(raw, INDUSTRY_MEMBER_FIELDS, "index_member_all ts_code backfill")
     _reject_row_limit(raw, row_limit, "index_member_all ts_code backfill")
     if raw.empty:
+        if allow_empty:
+            return normalize_industry_membership(raw, allowed_l1_codes)
         raise ValueError(
             f"index_member_all returned empty backfill response for {expected_ts_code}"
         )
@@ -300,9 +303,12 @@ def validate_exposure_tables(
     expected_industry_ids: set[str] | None = None,
     expected_market_observations: pd.DataFrame | None = None,
     minimum_temporal_coverage: float | None = None,
+    minimum_industry_observation_coverage: float = 1.0,
     market_start_date: date | None = None,
     market_end_date: date | None = None,
 ) -> dict[str, object]:
+    if not 0 < minimum_industry_observation_coverage <= 1:
+        raise ValueError("minimum industry observation coverage must be in (0, 1]")
     expected_security_ids = expected_security_ids or set(
         tables.market_cap.attrs.get("expected_security_ids", [])
     )
@@ -406,6 +412,20 @@ def validate_exposure_tables(
         < minimum_temporal_coverage
         for security_id, expected_count in expected_by_security.items()
     )
+    industry_expected, industry_matched, missing_industry_security_ids = (
+        _industry_observation_coverage(
+            expected_market_observations, tables.industry_membership
+        )
+    )
+    missing_industry_observations = industry_expected - industry_matched
+    industry_coverage_ratio = (
+        industry_matched / industry_expected if industry_expected else 1.0
+    )
+    insufficient_industry_coverage = (
+        missing_industry_observations
+        if industry_coverage_ratio < minimum_industry_observation_coverage
+        else 0
+    )
     checks = {
         "empty_required_table": _quality_check(
             sum(
@@ -424,9 +444,17 @@ def validate_exposure_tables(
         "invalid_market_cap": _quality_check(invalid_cap),
         "missing_security_coverage": _quality_check(missing_security_coverage),
         "missing_membership_security_coverage": _quality_check(
-            missing_membership_security_coverage
+            missing_membership_security_coverage, severity="warning"
         ),
-        "missing_industry_coverage": _quality_check(missing_industry_coverage),
+        "missing_industry_coverage": _quality_check(
+            missing_industry_coverage, severity="warning"
+        ),
+        "missing_industry_observations": _quality_check(
+            missing_industry_observations, severity="warning"
+        ),
+        "insufficient_industry_observation_coverage": _quality_check(
+            insufficient_industry_coverage
+        ),
         "explicit_empty_industry_definition": {
             "severity": "info",
             "status": "pass",
@@ -442,6 +470,10 @@ def validate_exposure_tables(
         "error"
         if any(
             item["count"] and item["severity"] == "error" for item in checks.values()
+        )
+        else "warning"
+        if any(
+            item["count"] and item["severity"] == "warning" for item in checks.values()
         )
         else "pass"
     )
@@ -460,6 +492,15 @@ def validate_exposure_tables(
             "observed_observation_count": observed_observation_count,
             "temporal_coverage_ratio": round(temporal_coverage_ratio, 12),
             "minimum_temporal_coverage": minimum_temporal_coverage,
+            "industry_expected_observation_count": industry_expected,
+            "industry_matched_observation_count": industry_matched,
+            "industry_missing_observation_count": missing_industry_observations,
+            "industry_observation_coverage_ratio": round(industry_coverage_ratio, 12),
+            "minimum_industry_observation_coverage": (
+                minimum_industry_observation_coverage
+            ),
+            "missing_industry_security_count": len(missing_industry_security_ids),
+            "missing_industry_security_ids": missing_industry_security_ids,
         },
         "checks": checks,
     }
@@ -654,6 +695,7 @@ def acquire_exposure_tables(
                     l2_to_l1,
                     set(industry_codes),
                     expected_ts_code=code,
+                    allow_empty=True,
                 )
                 for code, item in zip(missing_ts_codes, backfill_results, strict=True)
             ],
@@ -683,6 +725,9 @@ def acquire_exposure_tables(
         expected_industry_ids=expected_industry_ids,
         expected_market_observations=phase5["observations"],
         minimum_temporal_coverage=config.minimum_fold_coverage,
+        minimum_industry_observation_coverage=(
+            config.minimum_industry_observation_coverage
+        ),
         market_start_date=config.warmup.start,
         market_end_date=config.test.end,
     )
@@ -869,9 +914,9 @@ def _interval_overlap_count(frame: pd.DataFrame) -> int:
     return count
 
 
-def _quality_check(count: int) -> dict[str, object]:
+def _quality_check(count: int, *, severity: str = "error") -> dict[str, object]:
     return {
-        "severity": "error",
+        "severity": severity,
         "status": "pass" if count == 0 else "fail",
         "count": count,
     }
@@ -882,3 +927,39 @@ def _observation_keys(frame: pd.DataFrame) -> set[tuple[pd.Timestamp, str]]:
         return set()
     dates = pd.to_datetime(frame["trade_date"], errors="raise").dt.normalize()
     return set(zip(dates, frame["security_id"].astype(str), strict=True))
+
+
+def _industry_observation_coverage(
+    observations: pd.DataFrame, memberships: pd.DataFrame
+) -> tuple[int, int, list[str]]:
+    """Measure point-in-time industry matches over Phase 5 market observations."""
+    keys = sorted(_observation_keys(observations), key=lambda item: (item[0], item[1]))
+    if not keys:
+        return 0, 0, []
+    expected = pd.DataFrame(keys, columns=["trade_date", "security_id"])
+    required = {"security_id", "effective_from", "effective_to", "known_at"}
+    if memberships.empty or not required.issubset(memberships.columns):
+        missing_ids = sorted(expected["security_id"].unique().tolist())
+        return len(expected), 0, missing_ids
+    intervals = memberships[list(required)].copy()
+    intervals["effective_from"] = pd.to_datetime(
+        intervals["effective_from"], errors="raise"
+    ).dt.normalize()
+    intervals["effective_to"] = pd.to_datetime(
+        intervals["effective_to"], errors="coerce"
+    ).dt.normalize()
+    intervals["known_at"] = pd.to_datetime(
+        intervals["known_at"], errors="raise", utc=True
+    )
+    joined = expected.merge(intervals, on="security_id", how="left")
+    trade = joined["trade_date"]
+    valid = (
+        (joined["effective_from"] <= trade)
+        & (joined["effective_to"].isna() | (trade <= joined["effective_to"]))
+        & (joined["known_at"].dt.date <= trade.dt.date)
+    )
+    matched = joined.loc[valid, ["trade_date", "security_id"]].drop_duplicates()
+    matched_keys = set(matched.itertuples(index=False, name=None))
+    missing_keys = set(keys) - matched_keys
+    missing_ids = sorted({str(item[1]) for item in missing_keys})
+    return len(keys), len(matched_keys), missing_ids

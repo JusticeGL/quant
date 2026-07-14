@@ -90,6 +90,9 @@ def materialize_exposure_snapshot(
         expected_industry_ids=expected_industry_ids,
         expected_market_observations=phase5_context["observations"],
         minimum_temporal_coverage=config.minimum_fold_coverage,
+        minimum_industry_observation_coverage=(
+            config.minimum_industry_observation_coverage
+        ),
         market_start_date=config.warmup.start,
         market_end_date=config.test.end,
     )
@@ -121,6 +124,9 @@ def materialize_exposure_snapshot(
             "start_date": config.warmup.start.isoformat(),
             "end_date": config.test.end.isoformat(),
             "minimum_temporal_coverage": config.minimum_fold_coverage,
+            "minimum_industry_observation_coverage": (
+                config.minimum_industry_observation_coverage
+            ),
         }
         artifact_identities = [
             {
@@ -496,12 +502,14 @@ def _recompute_quality_report(
         "start_date",
         "end_date",
         "minimum_temporal_coverage",
+        "minimum_industry_observation_coverage",
     }:
         raise ValueError("invalid coverage scope")
     start_date = date.fromisoformat(str(scope["start_date"]))
     end_date = date.fromisoformat(str(scope["end_date"]))
     threshold = float(scope["minimum_temporal_coverage"])
-    if threshold != 0.70 or end_date < start_date:
+    industry_threshold = float(scope["minimum_industry_observation_coverage"])
+    if threshold != 0.70 or industry_threshold != 0.98 or end_date < start_date:
         raise ValueError("invalid coverage policy")
     phase5_snapshot_id = manifest.get("phase5_snapshot_id")
     if not isinstance(phase5_snapshot_id, str):
@@ -543,6 +551,7 @@ def _recompute_quality_report(
         expected_industry_ids=set(definitions["industry_id"].astype(str)),
         expected_market_observations=observations,
         minimum_temporal_coverage=threshold,
+        minimum_industry_observation_coverage=industry_threshold,
         market_start_date=start_date,
         market_end_date=end_date,
     )

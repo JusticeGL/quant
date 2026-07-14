@@ -22,8 +22,10 @@ _EXPOSURE_CHECK_SEVERITIES = {
     "unknown_industry_reference": "error",
     "invalid_market_cap": "error",
     "missing_security_coverage": "error",
-    "missing_membership_security_coverage": "error",
-    "missing_industry_coverage": "error",
+    "missing_membership_security_coverage": "warning",
+    "missing_industry_coverage": "warning",
+    "missing_industry_observations": "warning",
+    "insufficient_industry_observation_coverage": "error",
     "explicit_empty_industry_definition": "info",
     "insufficient_temporal_coverage": "error",
     "undercovered_security": "error",
@@ -138,7 +140,8 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
 
     checks = quality["checks"]
     check_failure = set(checks) != set(_EXPOSURE_CHECK_SEVERITIES)
-    counts: list[int] = []
+    error_counts: list[int] = []
+    warning_counts: list[int] = []
     if not check_failure:
         for name, item in checks.items():
             severity = _EXPOSURE_CHECK_SEVERITIES[name]
@@ -146,9 +149,17 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
                 check_failure = True
                 break
             if severity == "error":
-                counts.append(item["count"])
+                error_counts.append(item["count"])
+            elif severity == "warning":
+                warning_counts.append(item["count"])
     failures = ["quality_checks"] if check_failure else []
-    derived_status = "error" if any(counts) or check_failure else "pass"
+    derived_status = (
+        "error"
+        if any(error_counts) or check_failure
+        else "warning"
+        if any(warning_counts)
+        else "pass"
+    )
     if (
         quality.get("status") != derived_status
         or quality.get("status") != manifest.get("quality_status")
@@ -181,6 +192,11 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
         if isinstance(coverage_scope, dict)
         else None
     )
+    industry_coverage_minimum = (
+        coverage_scope.get("minimum_industry_observation_coverage")
+        if isinstance(coverage_scope, dict)
+        else None
+    )
     derived_ratio = (
         observed_observations / expected_observations
         if _nonnegative_int(expected_observations)
@@ -193,6 +209,10 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
         "expected_industry_count",
         "expected_observation_count",
         "observed_observation_count",
+        "industry_expected_observation_count",
+        "industry_matched_observation_count",
+        "industry_missing_observation_count",
+        "missing_industry_security_count",
     )
     if (
         set(summary)
@@ -202,6 +222,9 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
             "temporal_coverage_ratio",
             "minimum_temporal_coverage",
             "explicit_empty_industry_count",
+            "industry_observation_coverage_ratio",
+            "minimum_industry_observation_coverage",
+            "missing_industry_security_ids",
         }
         or any(
             summary.get(key) != value for key, value in expected_summary_counts.items()
@@ -209,7 +232,11 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
         or any(not _nonnegative_int(summary.get(key)) for key in count_keys)
         or not _unit_number(summary.get("temporal_coverage_ratio"))
         or not _unit_number(summary.get("minimum_temporal_coverage"))
+        or not _unit_number(summary.get("industry_observation_coverage_ratio"))
+        or not _unit_number(summary.get("minimum_industry_observation_coverage"))
         or summary.get("minimum_temporal_coverage") != coverage_minimum
+        or summary.get("minimum_industry_observation_coverage")
+        != industry_coverage_minimum
         or (
             _nonnegative_int(expected_industry_count)
             and expected_industry_count
@@ -227,6 +254,28 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
         or not isinstance(reported_ratio, (int, float))
         or isinstance(reported_ratio, bool)
         or abs(float(reported_ratio) - derived_ratio) > 1e-12
+        or summary.get("industry_missing_observation_count")
+        != summary.get("industry_expected_observation_count", 0)
+        - summary.get("industry_matched_observation_count", 0)
+        or not isinstance(summary.get("missing_industry_security_ids"), list)
+        or summary.get("missing_industry_security_ids")
+        != sorted(set(summary.get("missing_industry_security_ids", [])))
+        or any(
+            not isinstance(value, str)
+            for value in summary.get("missing_industry_security_ids", [])
+        )
+        or summary.get("missing_industry_security_count")
+        != len(summary.get("missing_industry_security_ids", []))
+        or abs(
+            float(summary.get("industry_observation_coverage_ratio", -1))
+            - (
+                summary.get("industry_matched_observation_count", 0)
+                / summary.get("industry_expected_observation_count", 1)
+                if summary.get("industry_expected_observation_count", 0)
+                else 1.0
+            )
+        )
+        > 1e-12
     ):
         failures.append("quality_row_counts")
     return failures

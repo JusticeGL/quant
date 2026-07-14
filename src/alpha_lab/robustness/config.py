@@ -57,6 +57,7 @@ class RobustnessConfig(StrictModel):
     minimum_fold_coverage: float = Field(ge=0, le=1)
     minimum_direction_consistent_folds: int = Field(ge=1)
     minimum_industry_neutral_ic_retention: float = Field(ge=0, le=1)
+    minimum_industry_observation_coverage: float = Field(gt=0, le=1)
     size_correlation_risk_threshold: float = Field(ge=0, le=1)
     exposure_source: ExposureSourceConfig
 

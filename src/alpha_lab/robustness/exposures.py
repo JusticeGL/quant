@@ -87,6 +87,12 @@ def calculate_exposures(
         if neutral_ic is not None and original_ic not in (None, 0.0)
         else None
     )
+    industry_input_rows = int(len(base.dropna(subset=["score", "label"])))
+    industry_matched_rows = int(len(valid_industry))
+    industry_excluded_rows = industry_input_rows - industry_matched_rows
+    industry_coverage = (
+        industry_matched_rows / industry_input_rows if industry_input_rows else 1.0
+    )
     return {
         "size": {
             "joined_rows": int(len(valid_size)),
@@ -99,6 +105,10 @@ def calculate_exposures(
             "yearly": size_yearly,
         },
         "industry": {
+            "input_rows": industry_input_rows,
+            "matched_rows": industry_matched_rows,
+            "excluded_rows": industry_excluded_rows,
+            "coverage": industry_coverage,
             "joined_rows": int(len(comparable)),
             "original_joined_rows": int(len(comparable)),
             "original_rank_ic": original_ic,

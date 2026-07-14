@@ -46,6 +46,7 @@ def test_phase6_policy_has_exact_gates_and_exposure_source() -> None:
     assert config.minimum_fold_coverage == 0.70
     assert config.minimum_direction_consistent_folds == 4
     assert config.minimum_industry_neutral_ic_retention == 0.50
+    assert config.minimum_industry_observation_coverage == 0.98
     assert config.size_correlation_risk_threshold == 0.30
     assert config.exposure_source.classification_standard == "SW2021"
     assert config.exposure_source.endpoints.market_cap == "daily_basic"
@@ -85,6 +86,15 @@ def test_phase6_policy_hashes_validated_canonical_content() -> None:
     ).encode()
 
     assert digest == hashlib.sha256(canonical).hexdigest()
+
+
+@pytest.mark.parametrize("value", [0, -0.01, 1.01])
+def test_industry_observation_coverage_is_a_strict_unit_interval(value: float) -> None:
+    document = yaml.safe_load((ROOT / "config" / "robustness.yaml").read_text())
+    document["minimum_industry_observation_coverage"] = value
+
+    with pytest.raises(ValueError):
+        RobustnessConfig.model_validate(document)
 
 
 def test_phase6_contracts_are_frozen_dataclasses() -> None:

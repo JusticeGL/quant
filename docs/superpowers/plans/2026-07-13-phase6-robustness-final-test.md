@@ -82,11 +82,12 @@ class RobustnessConfig(StrictModel):
     minimum_fold_coverage: float
     minimum_direction_consistent_folds: int
     minimum_industry_neutral_ic_retention: float
+    minimum_industry_observation_coverage: float
     size_correlation_risk_threshold: float
     exposure_source: ExposureSourceConfig
 ```
 
-Write the exact 2020 warm-up, five annual 2021-2025 folds, locked 2026 test, 70 percent coverage, four consistent folds, 50 percent neutral IC retention, 0.30 size-risk threshold, SW2021 classification, and required endpoint names into `config/robustness.yaml`. Hash canonical YAML content after validation.
+Write the exact 2020 warm-up, five annual 2021-2025 folds, locked 2026 test, 70 percent fold coverage, the user-approved 98 percent point-in-time industry-observation coverage, four consistent folds, 50 percent neutral IC retention, 0.30 size-risk threshold, SW2021 classification, and required endpoint names into `config/robustness.yaml`. Hash canonical YAML content after validation.
 
 - [ ] **Step 4: Run the tests and verify GREEN**
 

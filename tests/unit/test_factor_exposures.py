@@ -50,6 +50,10 @@ def test_exposures_are_point_in_time_and_leave_missing_rows_missing() -> None:
     )
 
     assert report["industry"]["joined_rows"] == 4
+    assert report["industry"]["input_rows"] == 5
+    assert report["industry"]["matched_rows"] == 4
+    assert report["industry"]["excluded_rows"] == 1
+    assert report["industry"]["coverage"] == 0.8
     assert report["industry"]["neutral_rank_ic"] is not None
     assert report["industry"]["original_joined_rows"] == 4
     assert report["size"]["joined_rows"] == 4

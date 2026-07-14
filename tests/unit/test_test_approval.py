@@ -666,6 +666,10 @@ def _freeze_fixture(tmp_path: Path, *, passed: bool = True) -> Path:
             "yearly": {},
         },
         "industry": {
+            "input_rows": 10,
+            "matched_rows": 10,
+            "excluded_rows": 0,
+            "coverage": 1.0,
             "joined_rows": 10,
             "original_joined_rows": 10,
             "original_rank_ic": 0.1,
