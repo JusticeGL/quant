@@ -32,5 +32,31 @@ industry value is backfilled into history.
 - `make smoke`: Linux aarch64, Python 3.11.15; qlib 0.9.7, akshare 1.18.64,
   DuckDB 1.5.4, PyArrow 24.0.0 and LightGBM 4.6.0 imported.
 
-Real-cache publication and its idempotent replay are recorded below after the
-policy commit.
+## Real-cache bootstrap result
+
+After policy commit `1378735`, `make exposure-bootstrap` was run with
+`/private/tmp/quant-phase6-data.yaml` and the repository-local environment file.
+The builder wrote immutable snapshot `p6x-123df2b10b84b5020b29`. Its stored
+quality report is a warning, not an error, and preserves the complete result:
+
+- expected observations: 473,103;
+- matched observations: 445,199;
+- missing observations: 27,904;
+- coverage: 94.1019186097%;
+- missing-security count: 74, with all 74 sorted identifiers retained in the
+  quality report;
+- temporal coverage: 100%;
+- insufficient-industry-coverage error count: zero;
+- warning counts: 27,904 missing observations and 10 securities with no
+  membership interval.
+
+The command then stopped during the independent catalog validation. A direct
+container diagnostic reproduced the sanitized failure set
+`["quality_row_counts", "quality_recomputed"]`. Consequently the snapshot was
+not synchronized into DuckDB and must not yet be treated as a trusted pre-test
+capability. This is a new post-publication quality-recomputation blocker, not a
+failure of the approved 94% floor.
+
+Per the fail-closed rule, no idempotent replay, candidate freeze, robustness
+evaluation, approval, or final-test access was attempted. The immutable raw
+cache and the written snapshot were left untouched for diagnosis.
