@@ -117,8 +117,9 @@ def validate_pretest_capability(
     capability = _canonical_document(capability_path, "pre-test capability")
     _validate_capability_document(capability, manifest, reference)
     _validate_root_identity(manifest)
+    quality_status = _validated_manifest_quality_status(manifest)
     _validate_safe_namespace(capability)
-    _validate_catalog_anchor(data_dir, manifest, reference)
+    _validate_catalog_anchor(data_dir, manifest, reference, quality_status)
     for item in capability["artifacts"]:
         root = "research" if item["domain"] == "phase5" else "exposures"
         parent = (
@@ -155,7 +156,10 @@ def validate_pretest_capability(
 
 
 def _validate_catalog_anchor(
-    data_dir: Path, manifest: dict[str, Any], reference: dict[str, Any]
+    data_dir: Path,
+    manifest: dict[str, Any],
+    reference: dict[str, Any],
+    quality_status: str,
 ) -> None:
     database_path = data_dir / "metadata.duckdb"
     if _contains_symlink(database_path, data_dir) or not database_path.is_file():
@@ -219,7 +223,7 @@ def _validate_catalog_anchor(
         "point_in_time_exposure",
         "valid",
         manifest.get("identity_sha256"),
-        "pass",
+        quality_status,
         manifest.get("phase5_snapshot_id"),
     )
     if len(snapshot_rows) != 1 or tuple(snapshot_rows[0]) != expected_snapshot:
@@ -248,6 +252,16 @@ def _validate_catalog_anchor(
     )
     if tuple(quality_rows[0]) != expected_quality:
         raise ValueError("pre-test capability catalog quality anchor mismatch")
+
+
+def _validated_manifest_quality_status(manifest: dict[str, Any]) -> str:
+    quality_status = manifest.get("quality_status")
+    if not isinstance(quality_status, str) or quality_status not in {
+        "pass",
+        "warning",
+    }:
+        raise ValueError("exposure root manifest quality status is invalid")
+    return quality_status
 
 
 def _validate_safe_namespace(capability: dict[str, Any]) -> None:

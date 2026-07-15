@@ -181,6 +181,11 @@ def test_warning_quality_is_physically_recomputed_and_cataloged(
 
     database_path = tmp_path / "metadata.duckdb"
     catalog.sync_exposure_snapshot(database_path, tmp_path, result.manifest_path)
+    anchored_root, anchored_capability = validate_pretest_capability(
+        tmp_path, result.snapshot_id
+    )
+    assert anchored_root["quality_status"] == "warning"
+    assert anchored_capability["quality"]["status"] == "pass"
     with duckdb.connect(str(database_path), read_only=True) as connection:
         catalog_quality = connection.execute(
             "SELECT quality_status FROM meta.dataset_snapshot WHERE snapshot_id = ?",

@@ -603,6 +603,7 @@ def _write_manifest(
     root = {
         "schema_version": 1,
         "snapshot_type": "point_in_time_exposure",
+        "quality_status": "pass",
         "phase5_snapshot_id": phase5_id,
         "phase5_manifest_sha256": "a" * 64,
         "policy_sha256": "b" * 64,
@@ -664,11 +665,12 @@ def _write_catalog_anchor(data_dir: Path, manifest: dict[str, Any]) -> None:
             INSERT INTO meta.dataset_snapshot
                 (snapshot_id, snapshot_type, status, identity_sha256,
                  schema_version, quality_status, parent_snapshot_id)
-            VALUES (?, 'point_in_time_exposure', 'valid', ?, 1, 'pass', ?)
+            VALUES (?, 'point_in_time_exposure', 'valid', ?, 1, ?, ?)
             """,
             [
                 manifest["snapshot_id"],
                 manifest["identity_sha256"],
+                manifest["quality_status"],
                 manifest["phase5_snapshot_id"],
             ],
         )

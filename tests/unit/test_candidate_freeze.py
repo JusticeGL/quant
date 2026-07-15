@@ -342,6 +342,60 @@ def test_coherently_resigned_false_quality_requires_admin_catalog_anchor(
         )
 
 
+@pytest.mark.parametrize("quality_status", ["error", "unknown", None])
+def test_manifest_quality_status_must_be_approved_before_safe_parquet(
+    freeze_fixture: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    quality_status: str | None,
+) -> None:
+    manifest_path = freeze_fixture["exposure_manifest"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if quality_status is None:
+        del manifest["quality_status"]
+    else:
+        manifest["quality_status"] = quality_status
+    _write_json(manifest_path, manifest)
+    real_open = Path.open
+
+    def forbid_parquet(path: Path, *args: object, **kwargs: object) -> object:
+        if path.suffix == ".parquet":
+            raise AssertionError("invalid quality status reached safe Parquet")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", forbid_parquet)
+    with pytest.raises(ValueError, match="quality status"):
+        freeze_candidate(
+            "F1002",
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+            freeze_fixture["experiments"],
+        )
+
+
+def test_manifest_warning_catalog_pass_mismatch_fails_before_safe_parquet(
+    freeze_fixture: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = freeze_fixture["exposure_manifest"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["quality_status"] = "warning"
+    _write_json(manifest_path, manifest)
+    real_open = Path.open
+
+    def forbid_parquet(path: Path, *args: object, **kwargs: object) -> object:
+        if path.suffix == ".parquet":
+            raise AssertionError("catalog quality mismatch reached safe Parquet")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", forbid_parquet)
+    with pytest.raises(ValueError, match="catalog snapshot anchor"):
+        freeze_candidate(
+            "F1002",
+            freeze_fixture["config"],
+            freeze_fixture["data"],
+            freeze_fixture["experiments"],
+        )
+
+
 @pytest.mark.parametrize(
     "corruption",
     [
