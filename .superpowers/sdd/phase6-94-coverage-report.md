@@ -60,3 +60,41 @@ failure of the approved 94% floor.
 Per the fail-closed rule, no idempotent replay, candidate freeze, robustness
 evaluation, approval, or final-test access was attempted. The immutable raw
 cache and the written snapshot were left untouched for diagnosis.
+
+## Catalog validation resolution
+
+Commit `0732791` fixed two independent validation assumptions without changing
+the published snapshot or a migration:
+
+- the recomputation now takes the authenticated `expected_industry_ids` from
+  the physical membership Parquet metadata, instead of treating every industry
+  definition (including explicit empty responses) as an expected membership;
+- `observed_observation_count` is the intersection with expected Phase 5
+  observations and may therefore be smaller than the complete physical market
+  cap body. It may never exceed that body, and the subsequent independent
+  physical recomputation still requires every stored count, ratio, severity,
+  status, empty-response count and taxonomy-bridge count to match exactly.
+
+TDD reproduced both failures. The new integration case catalogs a warning
+snapshot while preserving warning severity/status, an explicit-empty count,
+and a market-cap body larger than the expected-observation intersection.
+Tampered observed counts remain rejected as `quality_recomputed`.
+
+Verification after the fix:
+
+- focused snapshot/quality/catalog suite: 95 passed;
+- `make lint`: passed;
+- `make test`: 391 passed;
+- `make smoke`: Linux aarch64 and Python 3.11.15; all five required imports
+  passed with the versions recorded above;
+- direct validation of the immutable real snapshot: healthy, zero failures,
+  warning status, 722 checked files, unchanged manifest SHA256
+  `7ef6377858c1eb859147e09feaf32b834e8a3343dbbae44e73bb49654b41183e`.
+
+Two normal real-cache `exposure-bootstrap` replays both returned the same
+snapshot ID and manifest SHA256 with warning status and synchronized DuckDB
+successfully. A separate instrumented cache replay counted 711 queries, 711
+cache hits and exactly zero network requests, again producing the same identity.
+The catalog contains exactly one snapshot row, one quality row and one linked
+pre-test capability for this identity; `latest_exposure_snapshot_id` points to
+it. No freeze, evaluation, approval, or final test was run.
