@@ -512,7 +512,7 @@ def test_industry_observation_coverage_below_threshold_fails_closed() -> None:
     assert report["summary"]["missing_industry_security_ids"] == ["CN:SSE:600000"]
 
 
-def test_approved_real_shape_warns_for_missing_industry_above_98_percent() -> None:
+def test_approved_real_shape_warns_at_94_percent_and_fails_below() -> None:
     security_ids = [f"CN:SSE:{value:06d}" for value in range(100)]
     dates = pd.date_range("2021-01-01", periods=10, freq="D")
     observations = pd.DataFrame(
@@ -538,7 +538,7 @@ def test_approved_real_shape_warns_for_missing_industry_above_98_percent() -> No
                 "ts_code": f"{value:06d}.SH",
                 "in_date": "20200101",
             }
-            for value in range(99)
+            for value in range(94)
         ]
     )
     tables = ExposureTables(
@@ -553,22 +553,45 @@ def test_approved_real_shape_warns_for_missing_industry_above_98_percent() -> No
         expected_security_ids=set(security_ids),
         expected_market_observations=observations,
         minimum_temporal_coverage=1.0,
-        minimum_industry_observation_coverage=0.98,
+        minimum_industry_observation_coverage=0.94,
     )
 
     assert report["status"] == "warning"
     assert report["summary"]["industry_expected_observation_count"] == 1000
-    assert report["summary"]["industry_matched_observation_count"] == 990
-    assert report["summary"]["industry_missing_observation_count"] == 10
-    assert report["summary"]["industry_observation_coverage_ratio"] == 0.99
-    assert report["summary"]["missing_industry_security_count"] == 1
-    assert report["summary"]["missing_industry_security_ids"] == ["CN:SSE:000099"]
+    assert report["summary"]["industry_matched_observation_count"] == 940
+    assert report["summary"]["industry_missing_observation_count"] == 60
+    assert report["summary"]["industry_observation_coverage_ratio"] == 0.94
+    assert report["summary"]["missing_industry_security_count"] == 6
+    assert report["summary"]["missing_industry_security_ids"] == [
+        f"CN:SSE:{value:06d}" for value in range(94, 100)
+    ]
     assert report["checks"]["missing_industry_observations"] == {
         "severity": "warning",
         "status": "fail",
-        "count": 10,
+        "count": 60,
     }
     assert report["checks"]["insufficient_industry_observation_coverage"]["count"] == 0
+
+    below_floor_tables = ExposureTables(
+        tables.market_cap,
+        tables.industry_definition,
+        tables.industry_membership.iloc[:-1].copy(),
+    )
+    below_floor = validate_exposure_tables(
+        below_floor_tables,
+        set(security_ids),
+        expected_security_ids=set(security_ids),
+        expected_market_observations=observations,
+        minimum_temporal_coverage=1.0,
+        minimum_industry_observation_coverage=0.94,
+    )
+    assert below_floor["summary"]["industry_observation_coverage_ratio"] == 0.93
+    assert below_floor["checks"]["insufficient_industry_observation_coverage"] == {
+        "severity": "error",
+        "status": "fail",
+        "count": 70,
+    }
+    assert below_floor["status"] == "error"
 
 
 def test_provider_row_limit_is_rejected() -> None:
@@ -838,7 +861,7 @@ def test_acquisition_bridges_historical_taxonomy_and_counts_provenance(
         expected_market_observations=tables.market_cap.attrs[
             "expected_market_observations"
         ],
-        minimum_industry_observation_coverage=0.98,
+        minimum_industry_observation_coverage=0.94,
     )
     assert quality["summary"]["historical_taxonomy_bridge_count"] == 1
 

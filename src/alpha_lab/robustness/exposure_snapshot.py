@@ -509,7 +509,7 @@ def _recompute_quality_report(
     end_date = date.fromisoformat(str(scope["end_date"]))
     threshold = float(scope["minimum_temporal_coverage"])
     industry_threshold = float(scope["minimum_industry_observation_coverage"])
-    if threshold != 0.70 or industry_threshold != 0.98 or end_date < start_date:
+    if threshold != 0.70 or industry_threshold != 0.94 or end_date < start_date:
         raise ValueError("invalid coverage policy")
     phase5_snapshot_id = manifest.get("phase5_snapshot_id")
     if not isinstance(phase5_snapshot_id, str):

@@ -74,8 +74,13 @@ coverage, checksum, and quality validation. `exposure-bootstrap` then syncs the
 validated manifest into `data/metadata.duckdb`; a freeze cannot trust an
 uncataloged capability.
 
-Historical industry coverage has a user-approved minimum of 98%. It is
-calculated over every expected Phase 5 `(trade_date, security_id)` observation
+Historical industry coverage has a user-approved minimum of 94%. The user
+explicitly revised the initial 98% floor on 2026-07-15 after real-cache
+validation found 445,199/473,103 matched observations (94.1019186097%), with
+27,904 missing observations across 74 securities. This accepts a bounded risk
+in the industry-neutral diagnostic; it does not authorize current-value
+backfill or relax any other gate. Coverage is calculated over every expected
+Phase 5 `(trade_date, security_id)` observation
 using membership intervals valid and known on that date. Missing industry
 securities and observations are reported as deterministic warnings at or above
 the threshold; below it publication fails closed. Such observations still take

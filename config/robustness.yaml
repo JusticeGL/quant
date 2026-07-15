@@ -30,7 +30,7 @@ cost_multipliers: [0.5, 1.0, 1.5, 2.0]
 minimum_fold_coverage: 0.70
 minimum_direction_consistent_folds: 4
 minimum_industry_neutral_ic_retention: 0.50
-minimum_industry_observation_coverage: 0.98
+minimum_industry_observation_coverage: 0.94
 size_correlation_risk_threshold: 0.30
 exposure_source:
   provider: tushare

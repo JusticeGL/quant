@@ -46,7 +46,7 @@ def test_phase6_policy_has_exact_gates_and_exposure_source() -> None:
     assert config.minimum_fold_coverage == 0.70
     assert config.minimum_direction_consistent_folds == 4
     assert config.minimum_industry_neutral_ic_retention == 0.50
-    assert config.minimum_industry_observation_coverage == 0.98
+    assert config.minimum_industry_observation_coverage == 0.94
     assert config.size_correlation_risk_threshold == 0.30
     assert config.exposure_source.classification_standard == "SW2021"
     assert config.exposure_source.endpoints.market_cap == "daily_basic"

@@ -46,12 +46,17 @@ industries. Industry membership requires
   closed. Each bridged interval records source/target taxonomy and mapping
   provenance, and quality reports disclose the bridge count.
 
-On 2026-07-14 the user explicitly approved a minimum 98% industry-observation
-coverage policy for the historical pre-test input. Coverage is measured over
+On 2026-07-14 the user initially approved a minimum 98% industry-observation
+coverage policy for the historical pre-test input. A real-cache validation on
+2026-07-14 measured 445,199 matches out of 473,103 observations: 27,904 missing
+observations across 74 securities and 94.1019186097% coverage. On 2026-07-15
+the user explicitly approved lowering only this minimum to 94%, accepting the
+documented historical-industry diagnostic risk rather than backfilling current
+industry values into history or introducing a new provider. Coverage is measured over
 the Phase 5 expected `(trade_date, security_id)` observations by point-in-time
 interval matching, including `known_at`; it is not an entity-ever-mapped
 ratio. Missing securities and observations are deterministic warnings when the
-ratio remains at least 98%, while a ratio below 98% is an error and prevents
+ratio remains at least 94%, while a ratio below 94% is an error and prevents
 publication. Empty L1 responses remain explicit information, and duplicate,
 overlap, unknown-reference, and market-cap gates are unchanged. Unmatched rows
 remain in factor and cost evaluation but are excluded from industry-neutral

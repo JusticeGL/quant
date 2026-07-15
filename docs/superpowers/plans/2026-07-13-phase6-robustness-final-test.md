@@ -87,7 +87,7 @@ class RobustnessConfig(StrictModel):
     exposure_source: ExposureSourceConfig
 ```
 
-Write the exact 2020 warm-up, five annual 2021-2025 folds, locked 2026 test, 70 percent fold coverage, the user-approved 98 percent point-in-time industry-observation coverage, four consistent folds, 50 percent neutral IC retention, 0.30 size-risk threshold, SW2021 classification, and required endpoint names into `config/robustness.yaml`. Hash canonical YAML content after validation.
+Write the exact 2020 warm-up, five annual 2021-2025 folds, locked 2026 test, 70 percent fold coverage, the point-in-time industry-observation coverage floor (initially 98 percent on 2026-07-14, explicitly revised by the user to 94 percent on 2026-07-15 after the 94.1019186097 percent real-cache result), four consistent folds, 50 percent neutral IC retention, 0.30 size-risk threshold, SW2021 classification, and required endpoint names into `config/robustness.yaml`. Hash canonical YAML content after validation. The revision changes no other gate: unmatched observations remain in primary factor, cost, and backtest calculations and are excluded only from industry-neutral diagnostics.
 
 - [ ] **Step 4: Run the tests and verify GREEN**
 
