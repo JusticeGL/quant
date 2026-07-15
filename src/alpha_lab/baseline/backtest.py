@@ -88,6 +88,7 @@ def run_topk_backtest(
 
     cash = strategy.initial_cash
     positions: dict[str, Position] = {}
+    last_close: dict[str, float] = {}
     daily_rows: list[dict[str, object]] = []
     trade_rows: list[dict[str, object]] = []
     constraints = {
@@ -149,7 +150,9 @@ def run_topk_backtest(
                 )
                 del positions[instrument]
 
-            marked_equity = cash + _position_value(positions, day, "open")
+            marked_equity = cash + _position_value(
+                positions, day, "open", last_prices=last_close
+            )
             target_value = marked_equity / strategy.top_k
             for instrument in target:
                 if instrument in positions:
@@ -183,7 +186,7 @@ def run_topk_backtest(
                     _trade_row(trade_date, instrument, "buy", shares, price, fee)
                 )
 
-        close_value = _position_value(positions, day, "close")
+        close_value = _position_value(positions, day, "close", last_prices=last_close)
         daily_rows.append(
             {
                 "trade_date": trade_date,
@@ -194,6 +197,10 @@ def run_topk_backtest(
                 "turnover_notional": turnover,
                 "fees": fees,
             }
+        )
+        last_close.update(
+            (str(instrument), float(value))
+            for instrument, value in day["close"].items()
         )
 
     daily = pd.DataFrame(daily_rows)
@@ -297,10 +304,22 @@ def _transaction_fee(
 
 
 def _position_value(
-    positions: dict[str, Position], day: pd.DataFrame, field: Literal["open", "close"]
+    positions: dict[str, Position],
+    day: pd.DataFrame,
+    field: Literal["open", "close"],
+    *,
+    last_prices: dict[str, float] | None = None,
 ) -> float:
     total = 0.0
     for instrument, position in positions.items():
+        if instrument not in day.index and last_prices is not None:
+            try:
+                total += position.shares * last_prices[instrument]
+            except KeyError as error:
+                raise ValueError(
+                    f"no current or prior price for held instrument {instrument}"
+                ) from error
+            continue
         row = _market_row(day, instrument)
         total += position.shares * float(row[field])
     return total

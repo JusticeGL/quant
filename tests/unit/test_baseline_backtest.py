@@ -55,7 +55,9 @@ def test_topk_backtest_uses_next_day_open_lots_t_plus_one_and_fees() -> None:
 
 def test_topk_backtest_uses_declared_entry_date_for_robustness_predictions() -> None:
     config = load_phase2_config(Path("config"))
-    dates = pd.to_datetime(["2021-02-10", "2021-02-18", "2021-02-19", "2021-02-22"])
+    dates = pd.to_datetime(
+        ["2021-02-10", "2021-02-18", "2021-02-19", "2021-02-22", "2021-02-23"]
+    )
     market = pd.DataFrame(
         [
             {
@@ -73,7 +75,8 @@ def test_topk_backtest_uses_declared_entry_date_for_robustness_predictions() -> 
                 (dates[0], "SH600515"),
                 (dates[1], "SH600000"),
                 (dates[2], "SH600515"),
-                (dates[3], "SH600515"),
+                (dates[3], "SH600000"),
+                (dates[4], "SH600515"),
             )
         ]
     )
@@ -84,7 +87,7 @@ def test_topk_backtest_uses_declared_entry_date_for_robustness_predictions() -> 
             "score": [1.0],
             "label": [0.01],
             "entry_date": [dates[2]],
-            "exit_date": [dates[3]],
+            "exit_date": [dates[4]],
         }
     )
 
@@ -99,7 +102,7 @@ def test_topk_backtest_uses_declared_entry_date_for_robustness_predictions() -> 
 
     assert result.trades["trade_date"].tolist() == [
         dates[2].date(),
-        dates[3].date(),
+        dates[4].date(),
     ]
     assert result.trades["instrument"].tolist() == ["SH600515", "SH600515"]
     assert result.trades["side"].tolist() == ["buy", "sell"]
