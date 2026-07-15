@@ -201,6 +201,21 @@ def test_pipeline_queries_only_historical_member_union(tmp_path: Path) -> None:
     assert first.snapshot.quality_status == "pass"
 
 
+def test_pipeline_queries_complete_name_history_without_date_bounds(
+    tmp_path: Path,
+) -> None:
+    provider = FixtureProvider(tmp_path)
+
+    run_research_data_pipeline(ROOT / "config", tmp_path, provider=provider)
+
+    name_calls = [params for name, params in provider.calls if name == "namechange"]
+    assert {params["ts_code"] for params in name_calls} == {
+        "600001.SH",
+        "000001.SZ",
+    }
+    assert all(set(params) == {"ts_code"} for params in name_calls)
+
+
 def test_pipeline_preserves_nullable_st_but_complete_suspension_false(
     tmp_path: Path,
 ) -> None:

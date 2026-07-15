@@ -529,6 +529,11 @@ def _validate_robustness_artifacts(
             != [fold.fold_id for fold in expected_folds]
         ):
             raise ValueError("cost-sensitivity diagnostics are invalid")
+        if any(
+            item["constraints"]["blocked_unknown_status"] != 0
+            for item in scenario["folds"]
+        ):
+            raise PermissionError("test request is blocked by unknown execution status")
         aggregate = 1.0
         for item in scenario["folds"]:
             total_return = item["metrics"]["total_return"]

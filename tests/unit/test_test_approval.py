@@ -85,6 +85,19 @@ def test_request_requires_all_pretest_gates(tmp_path: Path) -> None:
         create_test_request(freeze)
 
 
+def test_request_rejects_unknown_execution_status_blocks(tmp_path: Path) -> None:
+    freeze = _freeze_fixture(tmp_path)
+    path = freeze.parent / "cost_sensitivity.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["scenarios"]["1.0"]["folds"][0]["constraints"][
+        "blocked_unknown_status"
+    ] = 1
+    _write_json(path, document)
+
+    with pytest.raises(PermissionError, match="unknown execution status"):
+        create_test_request(freeze)
+
+
 @pytest.mark.parametrize(
     ("artifact", "mutation"),
     [

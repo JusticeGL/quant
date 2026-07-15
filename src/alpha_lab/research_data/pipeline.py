@@ -321,7 +321,9 @@ def _query_security_history(
         provider.query(config.endpoints.daily_bar, params, DAILY_FIELDS),
         provider.query(config.endpoints.adjustment_factor, params, ADJUSTMENT_FIELDS),
         provider.query(config.endpoints.suspension, params, SUSPENSION_FIELDS),
-        provider.query(config.endpoints.name_history, params, NAME_FIELDS),
+        provider.query(
+            config.endpoints.name_history, {"ts_code": ts_code}, NAME_FIELDS
+        ),
     )
 
 

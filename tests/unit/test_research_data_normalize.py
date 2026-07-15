@@ -180,6 +180,45 @@ def test_name_history_keeps_latest_open_revision_for_same_announcement() -> None
     assert result.loc[0, "effective_from"] == pd.Timestamp("2024-04-24")
 
 
+def test_name_history_closes_superseded_open_intervals_before_next_state() -> None:
+    raw = pd.DataFrame(
+        [
+            {
+                "ts_code": "603185.SH",
+                "name": "上机数控",
+                "start_date": "20181210",
+                "end_date": "",
+                "ann_date": "20181210",
+                "change_reason": "其他",
+            },
+            {
+                "ts_code": "603185.SH",
+                "name": "上机数控",
+                "start_date": "20181228",
+                "end_date": "20230425",
+                "ann_date": None,
+                "change_reason": "其他",
+            },
+            {
+                "ts_code": "603185.SH",
+                "name": "弘元绿能",
+                "start_date": "20230426",
+                "end_date": "",
+                "ann_date": "20230422",
+                "change_reason": "改名",
+            },
+        ]
+    )
+
+    result = normalize_name_history(raw)
+
+    assert result["effective_to"].tolist() == [
+        pd.Timestamp("2018-12-27"),
+        pd.Timestamp("2023-04-25"),
+        pd.NaT,
+    ]
+
+
 def test_membership_uses_announcement_or_conservative_effective_date() -> None:
     raw = pd.DataFrame(
         [

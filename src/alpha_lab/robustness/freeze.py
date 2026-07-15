@@ -23,7 +23,7 @@ from alpha_lab.robustness.contracts import FrozenCandidate
 from alpha_lab.robustness.pretest_capability import validate_pretest_capability
 
 FREEZE_SCHEMA_VERSION = 1
-FIXED_PHASE5_SNAPSHOT_ID = "p5-ecaa6e8aeae6b9f8fb25"
+FIXED_PHASE5_SNAPSHOT_ID = "p5-5faed6ce3962b8cf3c70"
 
 
 def freeze_candidate(

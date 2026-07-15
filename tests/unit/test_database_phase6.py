@@ -812,7 +812,7 @@ def _exposure_tables() -> ExposureTables:
 
 
 def _write_phase5_fixture(data_dir: Path) -> Path:
-    snapshot_id = "p5-ecaa6e8aeae6b9f8fb25"
+    snapshot_id = "p5-5faed6ce3962b8cf3c70"
     research = data_dir / "research" / snapshot_id
     security = pd.DataFrame(
         [

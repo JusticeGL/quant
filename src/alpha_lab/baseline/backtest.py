@@ -41,18 +41,50 @@ def run_topk_backtest(
     signals = predictions.dropna(subset=["score"]).copy()
     signals["datetime"] = pd.to_datetime(signals["datetime"]).dt.date
     target_by_trade_date: dict[date, list[str]] = {}
+    exit_by_trade_date: dict[date, set[str]] = {}
+    explicit_execution_dates = {"entry_date", "exit_date"}.issubset(signals.columns)
+    if explicit_execution_dates:
+        signals["entry_date"] = pd.to_datetime(
+            signals["entry_date"], errors="raise"
+        ).dt.date
+        signals["exit_date"] = pd.to_datetime(
+            signals["exit_date"], errors="raise"
+        ).dt.date
+        invalid = signals[["entry_date", "exit_date"]].isna().any(axis=1) | ~(
+            (signals["datetime"] < signals["entry_date"])
+            & (signals["entry_date"] < signals["exit_date"])
+        )
+        if invalid.any():
+            raise ValueError("prediction execution dates are missing or not ordered")
     date_position = {value: index for index, value in enumerate(dates)}
     for signal_date, part in signals.groupby("datetime", sort=True):
-        index = date_position.get(signal_date)
-        if index is None or index + 1 >= len(dates):
-            continue
-        trade_date = dates[index + 1]
         ordered = part.sort_values(
             ["score", "instrument"], ascending=[False, True], kind="stable"
         )
-        target_by_trade_date[trade_date] = [
-            str(value) for value in ordered["instrument"].head(strategy.top_k)
-        ]
+        selected = ordered.head(strategy.top_k)
+        if explicit_execution_dates:
+            selected_dates = set(selected["entry_date"]) | set(selected["exit_date"])
+            if any(
+                trade_date not in date_position or trade_date > allowed_end
+                for trade_date in selected_dates
+            ):
+                raise ValueError("prediction execution date is outside market data")
+            for trade_date, entries in selected.groupby("entry_date", sort=True):
+                target_by_trade_date.setdefault(trade_date, []).extend(
+                    str(value) for value in entries["instrument"]
+                )
+            for trade_date, exits in selected.groupby("exit_date", sort=True):
+                exit_by_trade_date.setdefault(trade_date, set()).update(
+                    str(value) for value in exits["instrument"]
+                )
+        else:
+            index = date_position.get(signal_date)
+            if index is None or index + 1 >= len(dates):
+                continue
+            trade_date = dates[index + 1]
+            target_by_trade_date[trade_date] = [
+                str(value) for value in selected["instrument"]
+            ]
 
     cash = strategy.initial_cash
     positions: dict[str, Position] = {}
@@ -72,13 +104,22 @@ def run_topk_backtest(
         value.date(): part.set_index("instrument")
         for value, part in frame.groupby("trade_date", sort=True)
     }
-    active_dates = sorted(target_by_trade_date)
+    active_dates = sorted(set(target_by_trade_date) | set(exit_by_trade_date))
     if not active_dates:
         raise ValueError("no validation signal has an executable next trading day")
 
     for trade_date in [value for value in dates if value >= active_dates[0]]:
         day = by_date[trade_date]
-        target = target_by_trade_date.get(trade_date)
+        target: list[str] | None
+        if explicit_execution_dates and (
+            trade_date in target_by_trade_date or trade_date in exit_by_trade_date
+        ):
+            target = sorted(
+                (set(positions) - exit_by_trade_date.get(trade_date, set()))
+                | set(target_by_trade_date.get(trade_date, []))
+            )
+        else:
+            target = target_by_trade_date.get(trade_date)
         turnover = 0.0
         fees = 0.0
         if target is not None:

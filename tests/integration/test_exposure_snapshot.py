@@ -508,7 +508,7 @@ def test_validation_rejects_post_publication_phase5_tampering(
     tmp_path: Path, target: str, expected_failure: str
 ) -> None:
     result = _materialize_fixture(tmp_path)
-    phase5_path = tmp_path / "manifests" / "p5-ecaa6e8aeae6b9f8fb25" / "manifest.json"
+    phase5_path = tmp_path / "manifests" / "p5-5faed6ce3962b8cf3c70" / "manifest.json"
     if target == "manifest":
         phase5_path.write_bytes(phase5_path.read_bytes() + b" ")
     else:
@@ -767,7 +767,7 @@ def _out_of_scope_tables(trade_date: str) -> ExposureTables:
 
 
 def _phase5_fixture(tmp_path: Path) -> Path:
-    research = tmp_path / "research" / "p5-ecaa6e8aeae6b9f8fb25"
+    research = tmp_path / "research" / "p5-5faed6ce3962b8cf3c70"
     research.mkdir(parents=True)
     security = research / "security_master.parquet"
     names = research / "security_name_history.parquet"
@@ -873,11 +873,11 @@ def _phase5_fixture(tmp_path: Path) -> Path:
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 empty_dated.to_parquet(artifact, index=False)
             phase5_artifacts.append(artifact)
-    manifest_dir = tmp_path / "manifests" / "p5-ecaa6e8aeae6b9f8fb25"
+    manifest_dir = tmp_path / "manifests" / "p5-5faed6ce3962b8cf3c70"
     manifest_dir.mkdir(parents=True)
     manifest = {
         "schema_version": 1,
-        "snapshot_id": "p5-ecaa6e8aeae6b9f8fb25",
+        "snapshot_id": "p5-5faed6ce3962b8cf3c70",
         "snapshot_type": "research_market",
         "identity_sha256": "9" * 64,
         "quality_status": "pass",

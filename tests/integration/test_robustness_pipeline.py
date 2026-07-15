@@ -342,7 +342,7 @@ def test_real_candidates_and_backtester_cover_all_locked_cost_folds(
         if not trades.empty:
             assert (
                 pd.to_datetime(trades["trade_date"]).dt.date.max()
-                < pd.to_datetime(predictions["exit_date"]).dt.date.max()
+                <= pd.to_datetime(predictions["exit_date"]).dt.date.max()
             )
 
 
