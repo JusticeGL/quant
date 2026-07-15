@@ -244,7 +244,10 @@ def exposure_quality_failures(quality: object, manifest: dict[str, Any]) -> list
             > expected_summary_counts["industry_definition_count"]
         )
         or not _nonnegative_int(summary.get("explicit_empty_industry_count"))
-        or observed_observations != expected_summary_counts["market_cap_count"]
+        or (
+            _nonnegative_int(observed_observations)
+            and observed_observations > expected_summary_counts["market_cap_count"]
+        )
         or summary.get("observed_observation_count", 0)
         > summary.get("expected_observation_count", 0)
         or (

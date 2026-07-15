@@ -5,6 +5,7 @@ import json
 import shutil
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
@@ -147,6 +148,45 @@ def test_exposure_snapshot_is_deterministic_and_validated_before_pointer(
     assert json.loads(first.quality_report_path.read_text())["summary"][
         "industry_membership_pretest_count"
     ] == len(safe)
+
+
+def test_warning_quality_is_physically_recomputed_and_cataloged(
+    tmp_path: Path,
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    result = materialize_exposure_snapshot(
+        tmp_path,
+        config,
+        policy_sha256,
+        phase5_manifest,
+        _warning_tables(),
+        [_raw_input(tmp_path)],
+    )
+
+    stored = json.loads(result.quality_report_path.read_text(encoding="utf-8"))
+    assert stored["status"] == "warning"
+    assert stored["summary"]["expected_industry_count"] == 2
+    assert stored["summary"]["explicit_empty_industry_count"] == 1
+    assert stored["checks"]["missing_industry_coverage"] == {
+        "severity": "warning",
+        "status": "fail",
+        "count": 1,
+    }
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+    assert validation["healthy"] is True
+    assert validation["quality_status"] == "warning"
+    assert validation["failures"] == []
+
+    database_path = tmp_path / "metadata.duckdb"
+    catalog.sync_exposure_snapshot(database_path, tmp_path, result.manifest_path)
+    with duckdb.connect(str(database_path), read_only=True) as connection:
+        catalog_quality = connection.execute(
+            "SELECT quality_status FROM meta.dataset_snapshot WHERE snapshot_id = ?",
+            [result.snapshot_id],
+        ).fetchone()
+    assert catalog_quality == ("warning",)
 
 
 def test_exposure_snapshot_refuses_quality_error_without_publishing_pointer(
@@ -595,7 +635,12 @@ def test_validation_rejects_detached_quality_coverage_summary(
     validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
 
     assert validation["healthy"] is False
-    assert "quality_row_counts" in validation["failures"]
+    expected_failure = (
+        "quality_recomputed"
+        if corruption == "observed_observation_count"
+        else "quality_row_counts"
+    )
+    assert expected_failure in validation["failures"]
 
 
 def _materialize_fixture(tmp_path: Path):
@@ -662,6 +707,30 @@ def _tables() -> ExposureTables:
             membership, set(definitions["source_index_code"])
         ),
     )
+
+
+def _warning_tables() -> ExposureTables:
+    tables = _tables()
+    definitions = normalize_industry_definition(
+        pd.DataFrame(
+            [
+                ["801010.SI", "农林牧渔", "L1", "110000", "SW2021"],
+                ["801020.SI", "采掘", "L1", "210000", "SW2021"],
+                ["801030.SI", "化工", "L1", "220000", "SW2021"],
+            ],
+            columns=["index_code", "industry_name", "level", "industry_code", "src"],
+        )
+    )
+    membership = tables.industry_membership.copy()
+    membership.attrs["expected_industry_ids"] = [
+        "CN:SW2021:801010.SI",
+        "CN:SW2021:801020.SI",
+    ]
+    membership.attrs["explicit_empty_industry_ids"] = ["CN:SW2021:801030.SI"]
+    extra_market = tables.market_cap.iloc[[0]].copy()
+    extra_market["trade_date"] = pd.Timestamp("2021-01-05")
+    market = pd.concat([tables.market_cap, extra_market], ignore_index=True)
+    return ExposureTables(market, definitions, membership)
 
 
 def _attr_free_sparse_tables() -> ExposureTables:

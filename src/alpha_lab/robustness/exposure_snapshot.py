@@ -538,6 +538,12 @@ def _recompute_quality_report(
     pretest_membership = _read_verified_frame(
         data_dir, artifacts["industry_membership_pretest.parquet"]
     )
+    expected_industry_ids = set(
+        membership.attrs.get(
+            "expected_industry_ids",
+            membership["industry_id"].astype(str).tolist(),
+        )
+    )
     tables = ExposureTables(
         market_cap=pd.concat(market_parts, ignore_index=True),
         industry_definition=definitions,
@@ -548,7 +554,7 @@ def _recompute_quality_report(
         tables,
         set(context["security"]["security_id"].astype(str)),
         expected_security_ids=set(observations["security_id"].astype(str)),
-        expected_industry_ids=set(definitions["industry_id"].astype(str)),
+        expected_industry_ids=expected_industry_ids,
         expected_market_observations=observations,
         minimum_temporal_coverage=threshold,
         minimum_industry_observation_coverage=industry_threshold,
