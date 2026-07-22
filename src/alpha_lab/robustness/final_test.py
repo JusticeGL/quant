@@ -264,7 +264,12 @@ def _validate_policy(state: dict[str, Any]) -> dict[str, Any]:
     config, sha256 = load_robustness_config(path)
     if sha256 != state["policies"]["robustness"]["sha256"]:
         raise ValueError("robustness policy hash drift")
-    if config.test.model_dump(mode="json") != state["test"]:
+    locked_test = {
+        "start": config.test.start.isoformat(),
+        "end": config.test.end.isoformat(),
+        "access": config.test.access,
+    }
+    if locked_test != state["test"]:
         raise ValueError("locked test range drift")
     return {"robustness_config": config}
 

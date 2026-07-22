@@ -83,6 +83,24 @@ def test_dependency_failure_order_is_before_locked_read(
     assert order == stages[: stages.index(stage) + 1]
 
 
+def test_policy_validation_accepts_canonical_locked_test_subset() -> None:
+    _, policy_sha256 = final_test.load_robustness_config(Path("config/robustness.yaml"))
+
+    result = final_test._validate_policy(
+        {
+            "config_dir": Path("config"),
+            "policies": {"robustness": {"sha256": policy_sha256}},
+            "test": {
+                "start": "2026-01-01",
+                "end": "2026-07-11",
+                "access": "human_approval_only",
+            },
+        }
+    )
+
+    assert result["robustness_config"].test.locked is True
+
+
 def test_final_artifacts_are_idempotent_and_conflicts_are_immutable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
