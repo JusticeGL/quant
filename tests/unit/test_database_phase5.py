@@ -27,11 +27,13 @@ def _artifact(data_root: Path, relative: str, frame: pd.DataFrame) -> dict[str, 
     }
 
 
-def test_database_applies_two_immutable_migrations(tmp_path: Path) -> None:
+def test_database_preserves_phase5_migration_when_applying_phase6(
+    tmp_path: Path,
+) -> None:
     result = initialize_database(tmp_path / "metadata.duckdb")
     second = initialize_database(tmp_path / "metadata.duckdb")
 
-    assert result.schema_version == 2
+    assert result.schema_version == 3
     assert result.migration_sha256 == second.migration_sha256
     with duckdb.connect(str(result.database_path), read_only=True) as connection:
         migrations = connection.execute(
@@ -48,7 +50,11 @@ def test_database_applies_two_immutable_migrations(tmp_path: Path) -> None:
             ).fetchall()
         }
 
-    assert migrations == [(1, "initial_catalog"), (2, "research_data")]
+    assert migrations == [
+        (1, "initial_catalog"),
+        (2, "research_data"),
+        (3, "robustness_catalog"),
+    ]
     assert "meta.provider_capability" in tables
     assert "ref.security_name_history" in tables
 

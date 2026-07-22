@@ -7,7 +7,8 @@
 可恢复多轮日志。规格书列出的 Baostock 只在 AKShare 失败时作为显式备用源。
 
 Phase 5 增加 2020 年起沪深 300 动态成分、退市、历史名称/ST、停牌和独立复权因子。
-当前仍不包含锁定测试集评价或交易账户连接。Phase 4 的 `ACCEPT` 只表示进入人工复核，
+Phase 6 增加时点市值/申万行业暴露、五折稳健性验证、逐候选冻结以及显式人工审批门禁。
+默认工作流仍不访问锁定测试集，也不连接交易账户。Phase 4 的 `ACCEPT` 只表示进入人工复核，
 不会自动修改已接受因子注册表。
 
 ## 研究边界
@@ -191,6 +192,41 @@ make qlib-export SNAPSHOT=p1-<snapshot-id>
 标的统一改用 Baostock，避免在一个快照内混合不同来源口径；CLI 输出
 `selected_provider` 与 fallback 原因，manifest 的每个 raw input 记录实际 provider 和
 endpoint。Baostock 使用不需要凭据的公共数据会话，不是券商或交易账户连接。
+
+## Phase 6 稳健性与最终测试门禁
+
+Phase 6 先构建并登记独立的 `p6x-*` 时点暴露快照，再分别冻结 F1002/F1003，执行固定
+2021–2025 五折预检、四档成本和行业/市值暴露诊断。通过后只能生成测试申请；自动化必须
+停在人工审批点。批准必须指定 request、人工身份和 freeze SHA256，最终测试还必须显式
+指定对应 approval。设计或代码变更的批准不等同于最终测试批准。
+
+历史行业覆盖按 Phase 5 每个预期 `(trade_date, security_id)` 与当日已知的行业区间计算，
+最低门槛为 2026-07-15 明确批准的 94%。此前 98% 门槛在真实缓存校验中得到
+445,199/473,103（94.1019186097%）：缺失 27,904 条观测、涉及 74 只证券。此次批准只接受
+行业中性诊断的这项历史覆盖风险，不允许用当前行业回填历史，也不改变其他门槛。达到
+门槛时缺失证券和观测以 warning 明示，未匹配行仍参与
+因子和成本评估、但从行业中性诊断排除；低于门槛则拒绝发布快照。其他重复、区间重叠、
+未知引用和市值质量门槛不变。
+
+若非空历史行业记录无法通过 SW2021 L2 映射，bootstrap 会从同一 Tushare
+`index_classify` 缓存取得 SW2014 L1/L2/L3，仅按代码链桥接到在 SW2021 中唯一存在的
+稳定 L1 index code。L2/L3 双路径必须一致，不按行业名称猜测，也不维护证券硬编码例外；
+来源版本、目标版本、映射路径和使用数量均进入审计，任一缺失、歧义或冲突仍拒绝发布。
+
+```bash
+make exposure-probe
+make exposure-bootstrap
+make robustness-freeze ID=F1002
+make robustness-eval FREEZE=freeze-<sha256>
+make test-request FREEZE=freeze-<sha256>
+# 以下两条只能在人工检查小型审计报告后分别显式运行：
+make test-approve REQUEST=request-<sha256> APPROVER=<human> CONFIRM=<freeze-sha256>
+make final-test APPROVAL=approval-<sha256>
+```
+
+所有 Make 必填变量都会在启动 Python 前检查。命令输出结构化 JSON；provider、文件系统、
+校验或 DuckDB 错误只公开异常类型，不回显凭据。完整日历、恢复方法、warning 含义、
+不可变状态机和信任边界见 [Phase 6 稳健性说明](docs/phase6_robustness.md)。
 
 ## 数据产物
 

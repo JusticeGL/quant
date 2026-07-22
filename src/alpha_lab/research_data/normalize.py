@@ -114,10 +114,18 @@ def normalize_name_history(raw: pd.DataFrame) -> pd.DataFrame:
     )
     frame["is_st"] = compact_name.str.match(r"^(?:\*ST|ST|S\*ST|SST)").astype("boolean")
     frame["source"] = "tushare.namechange"
-    _validate_interval_order(frame, "name history")
-    return frame.sort_values(
+    frame = frame.sort_values(
         ["security_id", "effective_from"], kind="stable"
     ).reset_index(drop=True)
+    next_start = frame.groupby("security_id", sort=False)["effective_from"].shift(-1)
+    superseded = next_start.notna() & (
+        frame["effective_to"].isna() | (frame["effective_to"] >= next_start)
+    )
+    frame.loc[superseded, "effective_to"] = next_start.loc[superseded] - pd.Timedelta(
+        days=1
+    )
+    _validate_interval_order(frame, "name history")
+    return frame
 
 
 def normalize_index_membership_intervals(

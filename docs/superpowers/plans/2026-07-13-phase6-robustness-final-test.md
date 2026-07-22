@@ -82,11 +82,12 @@ class RobustnessConfig(StrictModel):
     minimum_fold_coverage: float
     minimum_direction_consistent_folds: int
     minimum_industry_neutral_ic_retention: float
+    minimum_industry_observation_coverage: float
     size_correlation_risk_threshold: float
     exposure_source: ExposureSourceConfig
 ```
 
-Write the exact 2020 warm-up, five annual 2021-2025 folds, locked 2026 test, 70 percent coverage, four consistent folds, 50 percent neutral IC retention, 0.30 size-risk threshold, SW2021 classification, and required endpoint names into `config/robustness.yaml`. Hash canonical YAML content after validation.
+Write the exact 2020 warm-up, five annual 2021-2025 folds, locked 2026 test, 70 percent fold coverage, the point-in-time industry-observation coverage floor (initially 98 percent on 2026-07-14, explicitly revised by the user to 94 percent on 2026-07-15 after the 94.1019186097 percent real-cache result), four consistent folds, 50 percent neutral IC retention, 0.30 size-risk threshold, SW2021 classification, and required endpoint names into `config/robustness.yaml`. Hash canonical YAML content after validation. The revision changes no other gate: unmatched observations remain in primary factor, cost, and backtest calculations and are excluded only from industry-neutral diagnostics.
 
 - [ ] **Step 4: Run the tests and verify GREEN**
 
@@ -167,6 +168,7 @@ Write stable Zstandard Parquet:
 data/exposures/p6x-*/market_cap/year=YYYY/part.parquet
 data/exposures/p6x-*/industry_definition.parquet
 data/exposures/p6x-*/industry_membership.parquet
+data/exposures/p6x-*/industry_membership_pretest.parquet
 data/manifests/p6x-*/quality_report.json
 data/manifests/p6x-*/manifest.json
 data/state/latest_exposure_snapshot.txt
@@ -250,10 +252,27 @@ git commit -m "feat: catalog phase 6 exposure metadata"
 - Test: `tests/unit/test_candidate_freeze.py`
 
 **Interfaces:**
-- Produces: `read_pretest_market(data_dir: Path, snapshot_id: str, end_before: date) -> pd.DataFrame`.
+- Produces: `read_pretest_market(data_dir: Path, capability_snapshot_id: str, end_before: date) -> pd.DataFrame`; the ID is the root p6x snapshot and no Phase 5-manifest fallback is allowed.
 - Produces: `read_pretest_exposures(data_dir: Path, snapshot_id: str, end_before: date) -> tuple[pd.DataFrame, pd.DataFrame]`.
 - Produces: `freeze_candidate(factor_id: str, config_dir: Path, data_dir: Path, experiments_dir: Path) -> FrozenCandidate`.
 - Produces: `validate_freeze(freeze_path: Path, config_dir: Path, data_dir: Path) -> dict[str, object]`.
+
+Task 2 publishes `manifests/<p6x-id>/pretest_capability.json` and binds its
+manifest-relative reference into root identity. Task 4/5 freeze and reader
+paths validate only that capability and its safe artifact list. Full roots and
+full quality reports remain publication/catalog inputs and future approved
+Task 6 final-test inputs only.
+
+Before safe artifact access, Task 4/5 also read `data/metadata.duckdb` in
+read-only mode and require the exact Task 3 catalog attestation for the p6x root
+and unique capability artifact plus passing administrative quality. They then
+validate the closed 2020-2025 safe partition set and Parquet footer row counts.
+Missing/old/mismatched catalog state fails closed before Parquet access.
+The migration ledger is matched exactly by version, name, and packaged SQL
+SHA256, including rejection of extras. This is a cooperative publisher check,
+not protection from manual database mutation or replacement by an actor with
+the same write authority; that stronger threat model needs an external trust
+root or enforced read-only storage.
 
 - [ ] **Step 1: Write failing locked-read tests**
 
@@ -417,6 +436,12 @@ Expected: FAIL because approval and final-test modules are missing.
 - [ ] **Step 3: Implement hash-linked request and approval artifacts**
 
 A request contains the freeze ID/hash, robustness report hash, all gate results, exact locked range, and `status=test_requested`. Approval requires a non-empty approver and exact freeze hash, and contains request hash, approval timestamp, and `status=approved`. IDs derive from canonical content excluding their own ID field.
+
+The implementation additionally revalidates the full Task 5 JSON set and
+recomputes the gates, pins the effective config/code execution bundle in the
+request, and records exact freeze/request/approval tuples in the existing
+schema-v3 catalog. The catalog is verified read-only before locked access; no
+new migration is required.
 
 - [ ] **Step 4: Implement final-test validation before data access**
 

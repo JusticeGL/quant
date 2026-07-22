@@ -1,0 +1,938 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+from pathlib import Path
+
+import duckdb
+import pandas as pd
+import pyarrow.parquet as pq
+import pytest
+
+from alpha_lab.database import catalog
+from alpha_lab.research_data.provider import TushareArtifact
+from alpha_lab.robustness import exposure_snapshot
+from alpha_lab.robustness.config import load_robustness_config
+from alpha_lab.robustness.contracts import ExposureTables
+from alpha_lab.robustness.exposure_data import (
+    normalize_industry_definition,
+    normalize_industry_membership,
+    normalize_market_cap,
+    validate_exposure_tables,
+)
+from alpha_lab.robustness.exposure_snapshot import (
+    derive_pretest_membership,
+    materialize_exposure_snapshot,
+    validate_exposure_snapshot,
+)
+from alpha_lab.robustness.pretest_capability import validate_pretest_capability
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_pretest_membership_is_deterministically_bounded() -> None:
+    full = pd.DataFrame(
+        [
+            {
+                "industry_id": "A",
+                "security_id": "CN:SSE:600000",
+                "effective_from": pd.Timestamp("2025-01-01"),
+                "effective_to": pd.NaT,
+                "known_at": pd.Timestamp("2025-01-01", tz="UTC"),
+                "source": "fixture",
+            },
+            {
+                "industry_id": "B",
+                "security_id": "CN:SSE:600001",
+                "effective_from": pd.Timestamp("2025-06-01"),
+                "effective_to": pd.Timestamp("2026-06-01"),
+                "known_at": pd.Timestamp("2025-06-01", tz="UTC"),
+                "source": "fixture",
+            },
+            {
+                "industry_id": "C",
+                "security_id": "CN:SSE:600002",
+                "effective_from": pd.Timestamp("2026-01-01"),
+                "effective_to": pd.NaT,
+                "known_at": pd.Timestamp("2025-12-01", tz="UTC"),
+                "source": "fixture",
+            },
+            {
+                "industry_id": "D",
+                "security_id": "CN:SSE:600003",
+                "effective_from": pd.Timestamp("2025-01-01"),
+                "effective_to": pd.NaT,
+                "known_at": pd.Timestamp("2026-01-01", tz="UTC"),
+                "source": "fixture",
+            },
+        ]
+    )
+
+    safe = derive_pretest_membership(full)
+
+    assert safe["industry_id"].tolist() == ["A", "B"]
+    assert safe["effective_to"].tolist() == [
+        pd.Timestamp("2025-12-31"),
+        pd.Timestamp("2025-12-31"),
+    ]
+    assert (safe["effective_from"] < pd.Timestamp("2026-01-01")).all()
+    assert (safe["effective_to"] < pd.Timestamp("2026-01-01")).all()
+    assert (safe["known_at"] < pd.Timestamp("2026-01-01", tz="UTC")).all()
+
+
+def test_exposure_snapshot_is_deterministic_and_validated_before_pointer(
+    tmp_path: Path,
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    raw_inputs = [_raw_input(tmp_path)]
+
+    first = materialize_exposure_snapshot(
+        tmp_path,
+        config,
+        policy_sha256,
+        phase5_manifest,
+        _tables(),
+        raw_inputs,
+    )
+    second = materialize_exposure_snapshot(
+        tmp_path,
+        config,
+        policy_sha256,
+        phase5_manifest,
+        _tables(),
+        raw_inputs,
+    )
+
+    assert first.snapshot_id.startswith("p6x-")
+    assert first.snapshot_id == second.snapshot_id
+    assert first.manifest_sha256 == second.manifest_sha256
+    assert (
+        tmp_path / "state" / "latest_exposure_snapshot.txt"
+    ).read_text().strip() == first.snapshot_id
+    validation = validate_exposure_snapshot(tmp_path, first.snapshot_id)
+    assert validation["healthy"] is True
+    catalog.sync_exposure_snapshot(
+        tmp_path / "metadata.duckdb", tmp_path, first.manifest_path
+    )
+    anchored_root, anchored_capability = validate_pretest_capability(
+        tmp_path, first.snapshot_id
+    )
+    assert anchored_root["snapshot_id"] == first.snapshot_id
+    assert anchored_capability["quality"]["status"] == "pass"
+    manifest = json.loads(first.manifest_path.read_text(encoding="utf-8"))
+    assert first.manifest_path == (
+        tmp_path / "manifests" / first.snapshot_id / "manifest.json"
+    )
+    assert manifest["quality_report"]["path"] == (
+        f"manifests/{first.snapshot_id}/quality_report.json"
+    )
+    assert (
+        manifest["phase5_manifest_sha256"]
+        == hashlib.sha256(phase5_manifest.read_bytes()).hexdigest()
+    )
+    assert manifest["policy_sha256"] == policy_sha256
+    assert any(
+        item["name"] == "market_cap/year=2026/part.parquet"
+        for item in manifest["artifacts"]
+    )
+    safe_artifact = next(
+        item
+        for item in manifest["artifacts"]
+        if item["name"] == "industry_membership_pretest.parquet"
+    )
+    safe = pd.read_parquet(tmp_path / safe_artifact["path"])
+    assert safe_artifact["row_count"] == len(safe)
+    assert manifest["artifacts"] != []
+    assert json.loads(first.quality_report_path.read_text())["summary"][
+        "industry_membership_pretest_count"
+    ] == len(safe)
+
+
+def test_warning_quality_is_physically_recomputed_and_cataloged(
+    tmp_path: Path,
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    result = materialize_exposure_snapshot(
+        tmp_path,
+        config,
+        policy_sha256,
+        phase5_manifest,
+        _warning_tables(),
+        [_raw_input(tmp_path)],
+    )
+
+    stored = json.loads(result.quality_report_path.read_text(encoding="utf-8"))
+    assert stored["status"] == "warning"
+    assert stored["summary"]["expected_industry_count"] == 2
+    assert stored["summary"]["explicit_empty_industry_count"] == 1
+    assert stored["checks"]["missing_industry_coverage"] == {
+        "severity": "warning",
+        "status": "fail",
+        "count": 1,
+    }
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+    assert validation["healthy"] is True
+    assert validation["quality_status"] == "warning"
+    assert validation["failures"] == []
+
+    database_path = tmp_path / "metadata.duckdb"
+    catalog.sync_exposure_snapshot(database_path, tmp_path, result.manifest_path)
+    anchored_root, anchored_capability = validate_pretest_capability(
+        tmp_path, result.snapshot_id
+    )
+    assert anchored_root["quality_status"] == "warning"
+    assert anchored_capability["quality"]["status"] == "pass"
+    with duckdb.connect(str(database_path), read_only=True) as connection:
+        catalog_quality = connection.execute(
+            "SELECT quality_status FROM meta.dataset_snapshot WHERE snapshot_id = ?",
+            [result.snapshot_id],
+        ).fetchone()
+    assert catalog_quality == ("warning",)
+
+
+def test_exposure_snapshot_refuses_quality_error_without_publishing_pointer(
+    tmp_path: Path,
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    tables = _tables()
+    tables.market_cap.loc[0, "security_id"] = "CN:SSE:600999"
+
+    with pytest.raises(ValueError, match="quality"):
+        materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            tables,
+            [_raw_input(tmp_path)],
+        )
+
+    assert not (tmp_path / "state" / "latest_exposure_snapshot.txt").exists()
+
+
+def test_materialization_rebuilds_coverage_when_dataframe_attrs_are_lost(
+    tmp_path: Path,
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    sparse = _attr_free_sparse_tables()
+
+    with pytest.raises(ValueError, match="quality"):
+        materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            sparse,
+            [_raw_input(tmp_path)],
+        )
+
+    assert not (tmp_path / "state" / "latest_exposure_snapshot.txt").exists()
+
+
+def test_snapshot_validation_recomputes_attr_free_sparse_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    sparse = _attr_free_sparse_tables()
+    legacy_quality = validate_exposure_tables(sparse, {"CN:SSE:600000"})
+    assert legacy_quality["status"] == "pass"
+    assert legacy_quality["summary"]["expected_observation_count"] == 0
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            "alpha_lab.robustness.exposure_snapshot.validate_exposure_tables",
+            lambda *args, **kwargs: legacy_quality,
+        )
+        patcher.setattr(
+            "alpha_lab.robustness.exposure_snapshot.validate_exposure_snapshot",
+            lambda *_: {"healthy": True, "failures": []},
+        )
+        result = materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            sparse,
+            [_raw_input(tmp_path)],
+        )
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_recomputed" in validation["failures"]
+
+
+@pytest.mark.parametrize("trade_date", ["2019-12-31", "2027-01-04"])
+def test_materialization_rejects_market_cap_outside_coverage_scope(
+    tmp_path: Path, trade_date: str
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    tables = _out_of_scope_tables(trade_date)
+
+    with pytest.raises(ValueError, match="quality"):
+        materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            tables,
+            [_raw_input(tmp_path)],
+        )
+
+    assert not (tmp_path / "state" / "latest_exposure_snapshot.txt").exists()
+
+
+def test_snapshot_validation_reads_and_rejects_extra_2027_partition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    tables = _out_of_scope_tables("2027-01-04")
+    expected = pd.DataFrame(
+        [
+            {
+                "trade_date": pd.Timestamp("2021-01-04"),
+                "security_id": "CN:SSE:600000",
+            },
+            {
+                "trade_date": pd.Timestamp("2026-07-10"),
+                "security_id": "CN:SSE:600000",
+            },
+        ]
+    )
+    legacy_quality = validate_exposure_tables(
+        tables,
+        {"CN:SSE:600000"},
+        expected_security_ids={"CN:SSE:600000"},
+        expected_industry_ids={"CN:SW2021:801010.SI"},
+        expected_market_observations=expected,
+        minimum_temporal_coverage=0.70,
+    )
+    assert legacy_quality["status"] == "pass"
+    with monkeypatch.context() as patcher:
+        patcher.setattr(
+            "alpha_lab.robustness.exposure_snapshot.validate_exposure_tables",
+            lambda *args, **kwargs: legacy_quality,
+        )
+        patcher.setattr(
+            "alpha_lab.robustness.exposure_snapshot.validate_exposure_snapshot",
+            lambda *_: {"healthy": True, "failures": []},
+        )
+        result = materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            tables,
+            [_raw_input(tmp_path)],
+        )
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert any(
+        item["name"] == "market_cap/year=2027/part.parquet"
+        for item in manifest["artifacts"]
+    )
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_recomputed" in validation["failures"]
+
+
+@pytest.mark.parametrize(("source_year", "wrong_year"), [(2021, 2019), (2026, 2027)])
+def test_materialization_rejects_declared_mislabeled_market_partition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_year: int,
+    wrong_year: int,
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    original_write_tables = exposure_snapshot._write_tables
+
+    def mislabeled_write(root: Path, tables: ExposureTables):
+        artifacts = original_write_tables(root, tables)
+        source_name = f"market_cap/year={source_year}/part.parquet"
+        target_name = f"market_cap/year={wrong_year}/part.parquet"
+        source = root / source_name
+        target = root / target_name
+        target.parent.mkdir(parents=True)
+        source.replace(target)
+        source.parent.rmdir()
+        for artifact in artifacts:
+            if artifact["name"] == source_name:
+                artifact["name"] = target_name
+        return artifacts
+
+    monkeypatch.setattr(exposure_snapshot, "_write_tables", mislabeled_write)
+
+    with pytest.raises(ValueError, match="validation"):
+        materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            _tables(),
+            [_raw_input(tmp_path)],
+        )
+
+    assert not (tmp_path / "state" / "latest_exposure_snapshot.txt").exists()
+
+
+@pytest.mark.parametrize("extra_year", [2019, 2027])
+def test_validation_rejects_undeclared_extra_market_partition(
+    tmp_path: Path, extra_year: int
+) -> None:
+    result = _materialize_fixture(tmp_path)
+    source_year = 2021 if extra_year == 2019 else 2026
+    source = result.snapshot_dir / f"market_cap/year={source_year}/part.parquet"
+    extra = result.snapshot_dir / f"market_cap/year={extra_year}/part.parquet"
+    extra.parent.mkdir(parents=True)
+    shutil.copyfile(source, extra)
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "artifact_layout" in validation["failures"]
+
+
+def test_materialization_rejects_declared_present_unexpected_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    original_write_tables = exposure_snapshot._write_tables
+
+    def write_tables_with_unexpected(root: Path, tables: ExposureTables):
+        artifacts = original_write_tables(root, tables)
+        source = root / "industry_definition.parquet"
+        unexpected = root / "unexpected.parquet"
+        shutil.copyfile(source, unexpected)
+        artifacts.append(
+            {
+                "name": "unexpected.parquet",
+                "sha256": hashlib.sha256(unexpected.read_bytes()).hexdigest(),
+                "row_count": len(tables.industry_definition),
+            }
+        )
+        return sorted(artifacts, key=lambda item: str(item["name"]))
+
+    monkeypatch.setattr(
+        exposure_snapshot, "_write_tables", write_tables_with_unexpected
+    )
+
+    with pytest.raises(ValueError, match="validation"):
+        materialize_exposure_snapshot(
+            tmp_path,
+            config,
+            policy_sha256,
+            phase5_manifest,
+            _tables(),
+            [_raw_input(tmp_path)],
+        )
+
+    assert not (tmp_path / "state" / "latest_exposure_snapshot.txt").exists()
+
+
+def test_validation_rejects_manifest_identity_tampering(tmp_path: Path) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    manifest["policy_sha256"] = "b" * 64
+    result.manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "identity_sha256" in validation["failures"]
+
+
+def test_validation_requires_matching_quality_report(tmp_path: Path) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("quality_report")
+    result.manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "missing:quality_report" in validation["failures"]
+
+
+def test_validation_rejects_detached_quality_report_path(tmp_path: Path) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    source = tmp_path / manifest["quality_report"]["path"]
+    detached = tmp_path / "manifests" / "detached-quality.json"
+    shutil.copyfile(source, detached)
+    manifest["quality_report"]["path"] = "manifests/detached-quality.json"
+    result.manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_reference" in validation["failures"]
+
+
+def test_validation_rejects_quality_reference_with_extra_fields(tmp_path: Path) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    manifest["quality_report"]["detached"] = False
+    result.manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_reference" in validation["failures"]
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_failure"),
+    [
+        ("manifest", "phase5_manifest_sha256"),
+        ("security_master.parquet", "phase5:sha256:security_master.parquet"),
+        ("index_membership.parquet", "phase5:sha256:index_membership.parquet"),
+        ("universe_dates.parquet", "phase5:sha256:universe_dates.parquet"),
+        (
+            "daily_bar/year=2021/part.parquet",
+            "phase5:sha256:daily_bar/year=2021/part.parquet",
+        ),
+    ],
+)
+def test_validation_rejects_post_publication_phase5_tampering(
+    tmp_path: Path, target: str, expected_failure: str
+) -> None:
+    result = _materialize_fixture(tmp_path)
+    phase5_path = tmp_path / "manifests" / "p5-5faed6ce3962b8cf3c70" / "manifest.json"
+    if target == "manifest":
+        phase5_path.write_bytes(phase5_path.read_bytes() + b" ")
+    else:
+        phase5 = json.loads(phase5_path.read_text(encoding="utf-8"))
+        artifact = next(item for item in phase5["artifacts"] if item["name"] == target)
+        path = tmp_path / artifact["path"]
+        path.write_bytes(b"tampered")
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert expected_failure in validation["failures"]
+
+
+def test_validation_rejects_substituted_quality_document(tmp_path: Path) -> None:
+    result = _materialize_fixture(tmp_path)
+    _replace_quality(result.manifest_path, tmp_path, {"status": "pass"})
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_schema" in validation["failures"]
+    assert "identity_sha256" in validation["failures"]
+
+
+def test_validation_rejects_internally_inconsistent_quality_check(
+    tmp_path: Path,
+) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    quality_path = tmp_path / manifest["quality_report"]["path"]
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    quality["checks"]["duplicate_keys"] = {
+        "severity": "error",
+        "status": "pass",
+        "count": 1,
+    }
+    _replace_quality(result.manifest_path, tmp_path, quality)
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_checks" in validation["failures"]
+
+
+def test_validation_rejects_quality_row_count_mismatch(tmp_path: Path) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    quality_path = tmp_path / manifest["quality_report"]["path"]
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    quality["summary"]["market_cap_count"] = 999
+    _replace_quality(result.manifest_path, tmp_path, quality)
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "quality_row_counts" in validation["failures"]
+
+
+def test_validation_rejects_missing_pretest_membership_artifact(
+    tmp_path: Path,
+) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    safe = next(
+        item
+        for item in manifest["artifacts"]
+        if item["name"] == "industry_membership_pretest.parquet"
+    )
+    (tmp_path / safe["path"]).unlink()
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "industry_membership_pretest" in validation["failures"]
+
+
+def test_validation_rejects_forged_pretest_membership_content(
+    tmp_path: Path,
+) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    safe = next(
+        item
+        for item in manifest["artifacts"]
+        if item["name"] == "industry_membership_pretest.parquet"
+    )
+    path = tmp_path / safe["path"]
+    frame = pd.read_parquet(path)
+    frame.loc[0, "effective_to"] = pd.Timestamp("2025-06-30")
+    frame.to_parquet(path, index=False)
+    safe["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    assert "industry_membership_pretest" in validation["failures"]
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "minimum_temporal_coverage",
+        "expected_industry_count",
+        "observed_observation_count",
+        "expected_security_count",
+    ],
+)
+def test_validation_rejects_detached_quality_coverage_summary(
+    tmp_path: Path, corruption: str
+) -> None:
+    result = _materialize_fixture(tmp_path)
+    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    quality_path = tmp_path / manifest["quality_report"]["path"]
+    quality = json.loads(quality_path.read_text(encoding="utf-8"))
+    if corruption == "minimum_temporal_coverage":
+        quality["summary"][corruption] = 0.0
+    elif corruption == "expected_industry_count":
+        quality["summary"][corruption] = 999
+    elif corruption == "observed_observation_count":
+        quality["summary"][corruption] = 0
+        quality["summary"]["temporal_coverage_ratio"] = 0.0
+    else:
+        quality["summary"][corruption] = (
+            quality["summary"]["expected_observation_count"] + 1
+        )
+    _replace_quality(result.manifest_path, tmp_path, quality)
+
+    validation = validate_exposure_snapshot(tmp_path, result.snapshot_id)
+
+    assert validation["healthy"] is False
+    expected_failure = (
+        "quality_recomputed"
+        if corruption == "observed_observation_count"
+        else "quality_row_counts"
+    )
+    assert expected_failure in validation["failures"]
+
+
+def _materialize_fixture(tmp_path: Path):
+    phase5_manifest = _phase5_fixture(tmp_path)
+    config, policy_sha256 = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    return materialize_exposure_snapshot(
+        tmp_path,
+        config,
+        policy_sha256,
+        phase5_manifest,
+        _tables(),
+        [_raw_input(tmp_path)],
+    )
+
+
+def _tables() -> ExposureTables:
+    definitions = normalize_industry_definition(
+        pd.DataFrame(
+            [["801010.SI", "农林牧渔", "L1", "110000", "SW2021"]],
+            columns=["index_code", "industry_name", "level", "industry_code", "src"],
+        )
+    )
+    membership = pd.DataFrame(
+        [
+            [
+                "801010.SI",
+                "农林牧渔",
+                "",
+                "",
+                "",
+                "",
+                "600000.SH",
+                "浦发银行",
+                "20210101",
+                "",
+                "Y",
+            ]
+        ],
+        columns=[
+            "l1_code",
+            "l1_name",
+            "l2_code",
+            "l2_name",
+            "l3_code",
+            "l3_name",
+            "ts_code",
+            "name",
+            "in_date",
+            "out_date",
+            "is_new",
+        ],
+    )
+    market = pd.DataFrame(
+        [
+            ["600000.SH", "20210104", 123.4, 100.0],
+            ["600000.SH", "20260710", 130.0, 110.0],
+        ],
+        columns=["ts_code", "trade_date", "total_mv", "circ_mv"],
+    )
+    return ExposureTables(
+        market_cap=normalize_market_cap(market),
+        industry_definition=definitions,
+        industry_membership=normalize_industry_membership(
+            membership, set(definitions["source_index_code"])
+        ),
+    )
+
+
+def _warning_tables() -> ExposureTables:
+    tables = _tables()
+    definitions = normalize_industry_definition(
+        pd.DataFrame(
+            [
+                ["801010.SI", "农林牧渔", "L1", "110000", "SW2021"],
+                ["801020.SI", "采掘", "L1", "210000", "SW2021"],
+                ["801030.SI", "化工", "L1", "220000", "SW2021"],
+            ],
+            columns=["index_code", "industry_name", "level", "industry_code", "src"],
+        )
+    )
+    membership = tables.industry_membership.copy()
+    membership.attrs["expected_industry_ids"] = [
+        "CN:SW2021:801010.SI",
+        "CN:SW2021:801020.SI",
+    ]
+    membership.attrs["explicit_empty_industry_ids"] = ["CN:SW2021:801030.SI"]
+    extra_market = tables.market_cap.iloc[[0]].copy()
+    extra_market["trade_date"] = pd.Timestamp("2021-01-05")
+    market = pd.concat([tables.market_cap, extra_market], ignore_index=True)
+    return ExposureTables(market, definitions, membership)
+
+
+def _attr_free_sparse_tables() -> ExposureTables:
+    complete = _tables()
+    market = complete.market_cap.iloc[:1].copy()
+    definition = complete.industry_definition.copy()
+    membership = complete.industry_membership.copy()
+    market.attrs = {}
+    definition.attrs = {}
+    membership.attrs = {}
+    return ExposureTables(market, definition, membership)
+
+
+def _out_of_scope_tables(trade_date: str) -> ExposureTables:
+    complete = _tables()
+    extra = normalize_market_cap(
+        pd.DataFrame(
+            [["600000.SH", trade_date.replace("-", ""), 140.0, 120.0]],
+            columns=["ts_code", "trade_date", "total_mv", "circ_mv"],
+        )
+    )
+    market = pd.concat([complete.market_cap, extra], ignore_index=True)
+    market.attrs = {}
+    return ExposureTables(
+        market,
+        complete.industry_definition.copy(),
+        complete.industry_membership.copy(),
+    )
+
+
+def _phase5_fixture(tmp_path: Path) -> Path:
+    research = tmp_path / "research" / "p5-5faed6ce3962b8cf3c70"
+    research.mkdir(parents=True)
+    security = research / "security_master.parquet"
+    names = research / "security_name_history.parquet"
+    membership = research / "index_membership.parquet"
+    universe = research / "universe_dates.parquet"
+    daily = research / "daily_bar" / "year=2021" / "part.parquet"
+    daily_2026 = research / "daily_bar" / "year=2026" / "part.parquet"
+    adjustment = research / "adjustment_factor" / "year=2021" / "part.parquet"
+    status = research / "daily_status" / "year=2021" / "part.parquet"
+    daily.parent.mkdir(parents=True)
+    daily_2026.parent.mkdir(parents=True)
+    adjustment.parent.mkdir(parents=True)
+    status.parent.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "security_id": "CN:SSE:600000",
+                "ts_code": "600000.SH",
+                "symbol": "600000",
+                "name": "浦发银行",
+                "exchange": "SSE",
+                "board": "主板",
+                "currency": "CNY",
+                "list_status": "L",
+                "list_date": pd.Timestamp("1999-11-10"),
+                "delist_date": pd.NaT,
+                "known_at": pd.Timestamp("2020-01-01", tz="UTC"),
+            }
+        ]
+    ).to_parquet(security, index=False)
+    pd.DataFrame(
+        [
+            {
+                "security_id": "CN:SSE:600000",
+                "name": "浦发银行",
+                "is_st": False,
+                "effective_from": pd.Timestamp("1999-11-10"),
+                "effective_to": pd.NaT,
+                "announced_at": pd.Timestamp("1999-11-10", tz="UTC"),
+                "known_at": pd.Timestamp("1999-11-10", tz="UTC"),
+            }
+        ]
+    ).to_parquet(names, index=False)
+    pd.DataFrame(
+        [
+            {
+                "index_id": "CN:INDEX:000300.SH",
+                "security_id": "CN:SSE:600000",
+                "effective_from": pd.Timestamp("2020-01-01"),
+                "effective_to": pd.NaT,
+                "announced_at": pd.Timestamp("2019-12-31", tz="UTC"),
+                "known_at": pd.Timestamp("2019-12-31", tz="UTC"),
+                "weight": 0.5,
+                "membership_method": "fixture",
+            }
+        ]
+    ).to_parquet(membership, index=False)
+    pd.DataFrame(
+        [
+            {
+                "as_of_date": pd.Timestamp("2021-01-04"),
+                "security_id": "CN:SSE:600000",
+            },
+            {
+                "as_of_date": pd.Timestamp("2026-07-10"),
+                "security_id": "CN:SSE:600000",
+            },
+        ]
+    ).to_parquet(universe, index=False)
+    pd.DataFrame(
+        [
+            {
+                "trade_date": pd.Timestamp("2021-01-04"),
+                "security_id": "CN:SSE:600000",
+            },
+        ]
+    ).to_parquet(daily, index=False)
+    pd.DataFrame(
+        [{"trade_date": pd.Timestamp("2026-07-10"), "security_id": "CN:SSE:600000"}]
+    ).to_parquet(daily_2026, index=False)
+    for path in (adjustment, status):
+        pd.DataFrame(
+            [
+                {
+                    "trade_date": pd.Timestamp("2021-01-04"),
+                    "security_id": "CN:SSE:600000",
+                    "known_at": pd.Timestamp("2021-01-04", tz="UTC"),
+                }
+            ]
+        ).to_parquet(path, index=False)
+    phase5_artifacts = [security, names, membership, universe, daily, daily_2026]
+    empty_dated = pd.DataFrame(
+        {
+            "trade_date": pd.Series(dtype="datetime64[ns]"),
+            "security_id": pd.Series(dtype="object"),
+            "known_at": pd.Series(dtype="datetime64[ns, UTC]"),
+        }
+    )
+    for dataset in ("daily_bar", "adjustment_factor", "daily_status"):
+        for year in range(2020, 2026):
+            artifact = research / dataset / f"year={year}" / "part.parquet"
+            if not artifact.exists():
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                empty_dated.to_parquet(artifact, index=False)
+            phase5_artifacts.append(artifact)
+    manifest_dir = tmp_path / "manifests" / "p5-5faed6ce3962b8cf3c70"
+    manifest_dir.mkdir(parents=True)
+    manifest = {
+        "schema_version": 1,
+        "snapshot_id": "p5-5faed6ce3962b8cf3c70",
+        "snapshot_type": "research_market",
+        "identity_sha256": "9" * 64,
+        "quality_status": "pass",
+        "source": {"provider": "tushare", "credential_redacted": True},
+        "scope": {
+            "index_code": "000300.SH",
+            "start_date": "2020-01-01",
+            "end_date": "2026-07-11",
+        },
+        "summary": {"security_count": 1, "daily_bar_count": 2},
+        "raw_inputs": [],
+        "artifacts": [
+            {
+                "name": artifact.relative_to(research).as_posix(),
+                "path": artifact.relative_to(tmp_path).as_posix(),
+                "format": "parquet",
+                "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                "row_count": pq.ParquetFile(artifact).metadata.num_rows,
+            }
+            for artifact in dict.fromkeys(phase5_artifacts)
+        ],
+    }
+    path = manifest_dir / "manifest.json"
+    path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def _raw_input(tmp_path: Path) -> TushareArtifact:
+    raw = tmp_path / "raw" / "tushare" / "fixture" / "request.parquet"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"fixture")
+    metadata = raw.with_suffix(".json")
+    metadata.write_text("{}\n", encoding="utf-8")
+    return TushareArtifact(
+        api_name="fixture",
+        request_sha256="a" * 64,
+        parquet_path=raw,
+        metadata_path=metadata,
+        sha256=hashlib.sha256(raw.read_bytes()).hexdigest(),
+        row_count=1,
+        params={},
+        fields=("fixture",),
+        ingested_at="2026-07-13T00:00:00Z",
+    )
+
+
+def _replace_quality(manifest_path: Path, data_dir: Path, quality: object) -> None:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    quality_path = data_dir / manifest["quality_report"]["path"]
+    quality_path.write_text(
+        json.dumps(quality, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    manifest["quality_report"]["sha256"] = hashlib.sha256(
+        quality_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8"
+    )

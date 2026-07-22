@@ -59,3 +59,54 @@ Phase 5 位于 `data/research/<p5-snapshot-id>/`，与 Phase 1 silver 并行：
 
 `known_at` 晚于查询日期的记录不可见。上游缺少公告日时使用生效日作为保守 fallback，并在
 `known_at_source` 中明确记录。
+
+## Phase 6 暴露快照与审批目录
+
+Phase 6 暴露快照位于 `data/exposures/<p6x-snapshot-id>/`，清单位于
+`data/manifests/<p6x-snapshot-id>/manifest.json`。清单同时锁定 Phase 5
+清单、稳健性策略、质量报告、raw request 与每个 Parquet artifact 的
+SHA256。
+
+| 数据集/目录表 | 主键 | 时点字段 | 说明 |
+|---|---|---|---|
+| `market.exposure_market_cap` | `trade_date,security_id` | `known_at` | 总市值和流通市值，单位 CNY；按年保留在 Parquet，DuckDB 只登记 artifact |
+| `ref.industry_definition` | `definition_id` | 快照身份 | SW2021 行业定义；`definition_id` 是记录内容 SHA256，`exposure_snapshot_id,industry_id` 唯一 |
+| `ref.industry_membership_history` | `membership_id` | `effective_from,effective_to,known_at` | 证券行业区间；同时外键引用行业定义和 `ref.security` |
+| `ref.industry_membership_pretest_artifact` | artifact SHA256 | 固定 cutoff `2026-01-01` | 仅登记 Parquet artifact，不复制事实；预测试读取器只能打开该物理隔离视图，完整历史仍由 `ref.industry_membership_history` 同步 |
+| `research.factor_freeze` | `freeze_id` | `created_at` | 锁定因子版本、Phase 5/暴露快照、策略哈希、Git commit 与最终测试区间；`freeze_id,freeze_sha256,test_start,test_end` 为唯一候选键 |
+| `research.test_request` | `request_id` | `requested_at` | 携带 `freeze_id,freeze_sha256,test_start,test_end`，复合外键引用完全一致的 freeze；状态固定为 `test_requested` |
+| `research.test_approval` | `approval_id` | `approved_at` | 携带 request、freeze、`confirmed_freeze_sha256` 与测试区间，复合外键保证实名审批精确绑定该 request |
+| `research.final_test_run` | `test_run_id` | `started_at,finished_at` | 携带 approval/request/freeze/hash/range 并复合引用完整审批身份；错误 freeze、hash 或区间由 DuckDB constraint 拒绝 |
+
+`effective_from <= D <= effective_to` 且 `known_at <= D` 时，行业成员记录才在
+日期 `D` 可见。`known_at_source=effective_date_fallback` 表示上游无公告日，
+使用生效日作为保守回退；禁止使用当前行业回填历史。
+
+完整区间保存在 canonical `industry_membership.parquet`。同一快照必须同时包含
+`industry_membership_pretest.parquet`：只保留 `effective_from` 与 `known_at`
+早于 2026-01-01 的记录，空结束日或跨越 cutoff 的结束日固定裁剪为
+2025-12-31。快照验证器从完整工件重新派生并比较内容及确定性 Parquet 字节；
+预测试路径不得打开完整工件。
+
+`manifests/<p6x-id>/pretest_capability.json` 是 Phase 6 预测试唯一的数据访问
+能力清单。它绑定固定截止日、Phase 5 父快照身份、策略哈希，以及允许打开的
+安全 artifact 哈希和行数；不含完整行业成员、完整质量报告、raw cache 或
+2026 统计。p6x 根 manifest 的 `pretest_capability` 引用参与根身份计算。
+
+预测试使用前还必须在 `data/metadata.duckdb` 找到 Task 3 写入的独立管理锚：
+精确的有效 p6x 快照身份/父快照、唯一 capability artifact 路径与 SHA，以及
+通过的管理质量记录。之后才允许读取安全 Parquet footer，并核对实际行数及
+2020-2025 封闭分区集合；缺失或不一致时在打开 Parquet 前失败。
+数据库迁移账本必须与内置 1-3 号迁移的版本、名称和 SQL SHA256 完全一致，
+也不允许额外记录。这里采用协作式不可变发布者模型：同权限写入者手工篡改或
+替换 DuckDB 不在保证范围；若要抵抗该攻击者，需要外部签名或独立强制只读存储。
+
+Catalog 同步在 Task 2 验证后记录 manifest SHA256，并在 DuckDB 写锁与
+事务内重读 manifest、比较 SHA256，然后对 market-cap、raw、quality、
+industry 与必需 Phase 5 依赖的当前文件字节逐一重算 SHA256。登记的
+是实算值。Phase 5 小型引用表、质量报告与行业表使用同一次读取所得的
+bytes 完成哈希与解析；写完 latest-state 后，`COMMIT` 前最后一次封口会
+重算两份 canonical manifest 及全部 exposure/raw/quality/industry/Phase 5
+依赖。封口发现验证后篡改、路径逃逸或中途异常时，整个同步事务回滚。
+Catalog 写锁不能约束不配合的外部文件写入者，只能在提交前封口时发现其
+漂移；因此 `data/raw` 必须保持 immutable、append-only，快照依赖不得覆盖。

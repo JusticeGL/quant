@@ -1,0 +1,46 @@
+schema_version: 1
+policy_id: phase6_robustness_v1
+phase5_snapshot_id: p5-5faed6ce3962b8cf3c70
+factor_ids: [F1002, F1003]
+warmup:
+  start: 2020-01-01
+  end: 2020-12-31
+walk_forward_folds:
+  - fold_id: wf_2021
+    start: 2021-01-01
+    end: 2021-12-31
+  - fold_id: wf_2022
+    start: 2022-01-01
+    end: 2022-12-31
+  - fold_id: wf_2023
+    start: 2023-01-01
+    end: 2023-12-31
+  - fold_id: wf_2024
+    start: 2024-01-01
+    end: 2024-12-31
+  - fold_id: wf_2025
+    start: 2025-01-01
+    end: 2025-12-31
+test:
+  start: 2026-01-01
+  end: 2026-07-11
+  locked: true
+  access: human_approval_only
+cost_multipliers: [0.5, 1.0, 1.5, 2.0]
+minimum_fold_coverage: 0.70
+minimum_direction_consistent_folds: 4
+minimum_industry_neutral_ic_retention: 0.50
+minimum_industry_observation_coverage: 0.94
+size_correlation_risk_threshold: 0.30
+exposure_source:
+  provider: tushare
+  classification_standard: SW2021
+  maximum_concurrency: 4
+  request_timeout_seconds: 30
+  max_attempts: 3
+  retry_delay_seconds: 2
+  request_interval_seconds: 0.2
+  endpoints:
+    market_cap: daily_basic
+    industry_classification: index_classify
+    industry_membership: index_member_all

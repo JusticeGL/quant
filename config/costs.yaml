@@ -3,6 +3,30 @@ policy_id: a_share_engineering_costs_v1
 locked: true
 currency: CNY
 rules:
+  - effective_from: 2021-01-01
+    effective_to: 2022-04-28
+    commission_rate: 0.0003
+    minimum_commission: 5.0
+    stamp_duty_rate_buy: 0.0
+    stamp_duty_rate_sell: 0.001
+    transfer_fee_rate_buy: 0.00002
+    transfer_fee_rate_sell: 0.00002
+    commission_assumption: true
+    sources:
+      stamp_duty: https://fgk.chinatax.gov.cn/zcfgk/c102416/c5211343/content.html
+      transfer_fee: http://www.chinaclear.cn/zdjs/tzgg/202204/1c36e55a9bd84c4bba4fcd269be26019.shtml
+  - effective_from: 2022-04-29
+    effective_to: 2023-08-27
+    commission_rate: 0.0003
+    minimum_commission: 5.0
+    stamp_duty_rate_buy: 0.0
+    stamp_duty_rate_sell: 0.001
+    transfer_fee_rate_buy: 0.00001
+    transfer_fee_rate_sell: 0.00001
+    commission_assumption: true
+    sources:
+      stamp_duty: https://fgk.chinatax.gov.cn/zcfgk/c102416/c5211343/content.html
+      transfer_fee: http://www.chinaclear.cn/zdjs/tzgg/202204/1c36e55a9bd84c4bba4fcd269be26019.shtml
   - effective_from: 2023-08-28
     effective_to: null
     commission_rate: 0.0003
@@ -16,5 +40,7 @@ rules:
       stamp_duty: https://fgk.chinatax.gov.cn/zcfgk/c102416/c5211343/content.html
       transfer_fee: http://www.chinaclear.cn/zdjs/tzgg/202204/1c36e55a9bd84c4bba4fcd269be26019.shtml
 notes: >-
-  Commission and minimum commission are engineering assumptions because broker
-  schedules differ. Stamp duty and transfer fee are effective-dated policy inputs.
+  Historical stamp-duty and transfer-fee inputs are represented as explicit
+  effective-dated rules for the Phase 6 walk-forward period. Commission and
+  minimum commission remain engineering assumptions because broker schedules
+  differ.

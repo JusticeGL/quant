@@ -48,6 +48,23 @@ experiments/**/*
 !experiments/**/decision.json
 !experiments/**/final_report.md
 
+# Phase 6: only compact, human-readable, hash-linked audit records are tracked.
+experiments/phase6/**/*
+!experiments/phase6/
+!experiments/phase6/freeze-*/
+!experiments/phase6/freeze-*/freeze.json
+!experiments/phase6/freeze-*/walk_forward.json
+!experiments/phase6/freeze-*/cost_sensitivity.json
+!experiments/phase6/freeze-*/exposure_report.json
+!experiments/phase6/freeze-*/robustness_report.md
+!experiments/phase6/freeze-*/test_request.json
+!experiments/phase6/freeze-*/approvals/
+!experiments/phase6/freeze-*/approvals/approval-*.json
+!experiments/phase6/freeze-*/final/
+!experiments/phase6/freeze-*/final/final-*/
+!experiments/phase6/freeze-*/final/final-*/result.json
+!experiments/phase6/freeze-*/final/final-*/report.md
+
 # Notebook and generated report output
 **/.ipynb_checkpoints/
 reports/generated/

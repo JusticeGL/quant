@@ -1,0 +1,166 @@
+from __future__ import annotations
+
+import copy
+from datetime import date
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from alpha_lab.baseline.config import CostConfig, CostRule
+from alpha_lab.robustness.config import WalkForwardFold, load_robustness_config
+from alpha_lab.robustness.walk_forward import (
+    backtest_predictions,
+    build_fold_labels,
+    evaluate_gates,
+    scale_costs,
+)
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_labels_do_not_cross_fold_end() -> None:
+    market = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(
+                ["2025-12-29", "2025-12-30", "2025-12-31", "2026-01-02"]
+            ),
+            "instrument": ["SH600000"] * 4,
+            "open": [10.0, 11.0, 12.0, 20.0],
+        }
+    )
+    labels = build_fold_labels(
+        market,
+        WalkForwardFold(
+            fold_id="wf_2025", start=date(2025, 1, 1), end=date(2025, 12, 31)
+        ),
+    )
+
+    valid = labels.dropna(subset=["label"])
+    assert valid["entry_date"].max().date() <= date(2025, 12, 31)
+    assert valid["exit_date"].max().date() <= date(2025, 12, 31)
+    assert valid.iloc[0]["label"] == 12.0 / 11.0 - 1.0
+
+
+def test_cost_scaling_includes_every_cost_field() -> None:
+    costs = CostConfig(
+        schema_version=1,
+        policy_id="fixture",
+        locked=True,
+        currency="CNY",
+        notes="fixture",
+        rules=[
+            CostRule(
+                effective_from=date(2020, 1, 1),
+                effective_to=None,
+                commission_rate=0.001,
+                minimum_commission=5.0,
+                stamp_duty_rate_buy=0.002,
+                stamp_duty_rate_sell=0.003,
+                transfer_fee_rate_buy=0.004,
+                transfer_fee_rate_sell=0.005,
+                commission_assumption=True,
+                sources={"fixture": "fixture"},
+            )
+        ],
+    )
+
+    scaled = scale_costs(costs, 1.5)
+
+    original = costs.rules[0]
+    result = scaled.rules[0]
+    assert result.commission_rate == original.commission_rate * 1.5
+    assert result.minimum_commission == original.minimum_commission * 1.5
+    assert result.stamp_duty_rate_buy == original.stamp_duty_rate_buy * 1.5
+    assert result.stamp_duty_rate_sell == original.stamp_duty_rate_sell * 1.5
+    assert result.transfer_fee_rate_buy == original.transfer_fee_rate_buy * 1.5
+    assert result.transfer_fee_rate_sell == original.transfer_fee_rate_sell * 1.5
+    assert costs.rules[0].minimum_commission == 5.0
+
+
+def test_gate_boundaries_are_exact_and_size_risk_is_not_a_gate() -> None:
+    config, _ = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    folds = [
+        {
+            "mean_rank_ic": -99.0,
+            "direction_consistent": value > 0,
+            "coverage": 0.70,
+        }
+        for value in (0.01, 0.02, 0.03, 0.04, -0.01)
+    ]
+    costs = {
+        "scenarios": {
+            "1.0": {"metrics": {"total_return": 0.01}},
+            "2.0": {"metrics": {"total_return": 0.0001}},
+        }
+    }
+    exposures = {
+        "industry": {"abs_rank_ic_retention": 0.50},
+        "size": {"risk_flag": True},
+    }
+
+    gates = evaluate_gates(folds, costs, exposures, config)
+
+    assert gates == {
+        "direction_consistency": True,
+        "fold_coverage": True,
+        "double_cost_direction": True,
+        "industry_neutral_retention": True,
+    }
+
+    costs["scenarios"]["2.0"]["metrics"]["total_return"] = 0.0
+    assert (
+        evaluate_gates(folds, costs, exposures, config)["double_cost_direction"]
+        is False
+    )
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+def test_all_gate_inputs_reject_non_finite_values(invalid: float) -> None:
+    config, _ = load_robustness_config(ROOT / "config" / "robustness.yaml")
+    valid_folds = [
+        {"direction_consistent": index < 4, "coverage": 0.70} for index in range(5)
+    ]
+    valid_costs = {
+        "scenarios": {
+            "1.0": {"metrics": {"total_return": 0.01}},
+            "2.0": {"metrics": {"total_return": 0.005}},
+        }
+    }
+    valid_exposures = {"industry": {"abs_rank_ic_retention": 0.50}}
+
+    costs = copy.deepcopy(valid_costs)
+    costs["scenarios"]["2.0"]["metrics"]["total_return"] = invalid
+    assert not evaluate_gates(valid_folds, costs, valid_exposures, config)[
+        "double_cost_direction"
+    ]
+
+    folds = [dict(item) for item in valid_folds]
+    folds[0]["coverage"] = invalid
+    assert not evaluate_gates(folds, valid_costs, valid_exposures, config)[
+        "fold_coverage"
+    ]
+
+    exposures = {"industry": {"abs_rank_ic_retention": invalid}}
+    assert not evaluate_gates(valid_folds, valid_costs, exposures, config)[
+        "industry_neutral_retention"
+    ]
+
+
+def test_backtest_predictions_require_fold_local_entry_exit_and_label() -> None:
+    evaluated = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime(["2025-12-29", "2025-12-30", "2025-12-31"]),
+            "instrument": ["SH600000"] * 3,
+            "score": [1.0, 2.0, 3.0],
+            "label": [0.01, pd.NA, pd.NA],
+            "entry_date": pd.to_datetime(["2025-12-30", "2025-12-31", None]),
+            "exit_date": pd.to_datetime(["2025-12-31", None, None]),
+        }
+    )
+
+    result = backtest_predictions(evaluated)
+
+    assert result["datetime"].dt.date.tolist() == [date(2025, 12, 29)]
+    assert result["entry_date"].dt.date.tolist() == [date(2025, 12, 30)]
+    assert result["exit_date"].dt.date.tolist() == [date(2025, 12, 31)]

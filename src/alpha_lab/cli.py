@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from datetime import date
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, NoReturn
 
 import duckdb
 import pandas as pd
@@ -18,6 +19,7 @@ from alpha_lab.data.quality import build_quality_report
 from alpha_lab.database.catalog import (
     check_database,
     initialize_database,
+    sync_exposure_snapshot,
     sync_repository_metadata,
     sync_research_snapshot,
 )
@@ -35,6 +37,15 @@ from alpha_lab.research_data.pipeline import (
 )
 from alpha_lab.research_data.snapshot import validate_research_snapshot
 from alpha_lab.research_data.universe import universe_as_of
+from alpha_lab.robustness.approval import (
+    approve_test_request,
+    create_test_request,
+)
+from alpha_lab.robustness.exposure_data import probe_exposure_capabilities
+from alpha_lab.robustness.exposure_snapshot import build_exposure_snapshot
+from alpha_lab.robustness.final_test import run_final_test
+from alpha_lab.robustness.freeze import freeze_candidate
+from alpha_lab.robustness.report import evaluate_frozen_candidate
 
 app = typer.Typer(
     add_completion=False,
@@ -45,6 +56,61 @@ app = typer.Typer(
 
 def _render(value: dict[str, Any]) -> None:
     typer.echo(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _phase6_error(operation: str, error: BaseException) -> NoReturn:
+    """Render a credential-safe error without echoing provider exception text."""
+    typer.echo(
+        json.dumps(
+            {
+                "error_type": type(error).__name__,
+                "operation": operation,
+                "status": "error",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        err=True,
+    )
+    raise typer.Exit(code=1) from error
+
+
+def _phase6_artifact(experiments_dir: Path, artifact_id: str, filename: str) -> Path:
+    """Resolve exactly one canonical Phase 6 artifact by its document ID."""
+    prefix = {
+        "freeze.json": "freeze",
+        "test_request.json": "request",
+        "approval.json": "approval",
+    }.get(filename)
+    if prefix is None:  # pragma: no cover - internal programming error
+        raise ValueError("unsupported Phase 6 artifact type")
+    if re.fullmatch(rf"{prefix}-[0-9a-f]{{64}}", artifact_id) is None:
+        raise ValueError(f"invalid Phase 6 {prefix} ID")
+    phase6 = experiments_dir / "phase6"
+    if filename == "freeze.json":
+        candidates = [phase6 / artifact_id / filename]
+    elif filename == "test_request.json":
+        candidates = sorted(phase6.glob(f"freeze-*/{filename}"))
+    else:  # approval.json
+        candidates = sorted(phase6.glob(f"freeze-*/approvals/{artifact_id}.json"))
+    matches: list[Path] = []
+    identity_key = {
+        "freeze.json": "freeze_id",
+        "test_request.json": "request_id",
+        "approval.json": "approval_id",
+    }[filename]
+    for candidate in candidates:
+        if not candidate.is_file() or candidate.is_symlink():
+            continue
+        try:
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(document, dict) and document.get(identity_key) == artifact_id:
+            matches.append(candidate)
+    if len(matches) != 1:
+        raise ValueError(f"expected exactly one registered {identity_key}")
+    return matches[0]
 
 
 def _latest_snapshot(data_dir: Path, snapshot: str | None) -> str:
@@ -547,6 +613,226 @@ def mining_report(
         typer.echo(f"mining report failed: {error}", err=True)
         raise typer.Exit(code=1) from error
     _render({"run_id": run_id, "report": str(path)})
+
+
+@app.command("exposure-probe")
+def exposure_probe(
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+) -> None:
+    """Probe bounded Phase 6 size and industry provider capabilities."""
+    try:
+        report = probe_exposure_capabilities(config_dir, data_dir)
+    except (duckdb.Error, OSError, RuntimeError, TypeError, ValueError) as error:
+        _phase6_error("exposure-probe", error)
+    _render({"operation": "exposure-probe", "status": "ok", **report})
+
+
+@app.command("exposure-bootstrap")
+def exposure_bootstrap(
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+) -> None:
+    """Build, validate, and catalog one immutable Phase 6 exposure snapshot."""
+    try:
+        result = build_exposure_snapshot(config_dir, data_dir)
+        sync_exposure_snapshot(
+            data_dir / "metadata.duckdb", data_dir, result.manifest_path
+        )
+    except (duckdb.Error, OSError, RuntimeError, TypeError, ValueError) as error:
+        _phase6_error("exposure-bootstrap", error)
+    _render(
+        {
+            "manifest": str(result.manifest_path),
+            "manifest_sha256": result.manifest_sha256,
+            "operation": "exposure-bootstrap",
+            "quality_status": result.quality_status,
+            "snapshot_id": result.snapshot_id,
+            "status": "ok",
+        }
+    )
+
+
+@app.command("robustness-freeze")
+def robustness_freeze(
+    factor_id: Annotated[str, typer.Option("--id", help="F1002 or F1003.")],
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    experiments_dir: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "experiments"
+    ),
+) -> None:
+    """Freeze one approved Phase 6 candidate and all current dependencies."""
+    try:
+        result = freeze_candidate(factor_id, config_dir, data_dir, experiments_dir)
+    except (
+        duckdb.Error,
+        KeyError,
+        OSError,
+        PermissionError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as error:
+        _phase6_error("robustness-freeze", error)
+    _render(
+        {
+            "factor_id": result.factor_id,
+            "freeze": str(result.freeze_path),
+            "freeze_id": result.freeze_id,
+            "freeze_sha256": result.freeze_sha256,
+            "operation": "robustness-freeze",
+            "status": "ok",
+        }
+    )
+
+
+@app.command("robustness-eval")
+def robustness_eval(
+    freeze: Annotated[str, typer.Option("--freeze", help="Freeze ID.")],
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    experiments_dir: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "experiments"
+    ),
+) -> None:
+    """Run the five fixed pre-test folds without opening the locked test."""
+    try:
+        freeze_path = _phase6_artifact(experiments_dir, freeze, "freeze.json")
+        result = evaluate_frozen_candidate(
+            freeze_path, config_dir, data_dir, experiments_dir
+        )
+    except (
+        duckdb.Error,
+        KeyError,
+        OSError,
+        PermissionError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as error:
+        _phase6_error("robustness-eval", error)
+    _render(
+        {
+            "freeze_id": result.freeze_id,
+            "operation": "robustness-eval",
+            "passed": result.passed,
+            "report": str(result.report_path),
+            "report_sha256": result.report_sha256,
+            "status": "ok",
+            "test_accessed": False,
+        }
+    )
+
+
+@app.command("test-request")
+def test_request(
+    freeze: Annotated[str, typer.Option("--freeze", help="Freeze ID.")],
+    experiments_dir: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "experiments"
+    ),
+) -> None:
+    """Create a request only after replaying all pre-test evidence."""
+    try:
+        freeze_path = _phase6_artifact(experiments_dir, freeze, "freeze.json")
+        request_path = create_test_request(freeze_path)
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+    except (
+        duckdb.Error,
+        KeyError,
+        OSError,
+        PermissionError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as error:
+        _phase6_error("test-request", error)
+    _render(
+        {
+            "freeze_id": request["freeze_id"],
+            "operation": "test-request",
+            "request": str(request_path),
+            "request_id": request["request_id"],
+            "status": "test_requested",
+            "test_accessed": False,
+        }
+    )
+
+
+@app.command("test-approve")
+def test_approve(
+    request: Annotated[str, typer.Option("--request", help="Request ID.")],
+    approver: Annotated[str, typer.Option("--approver", help="Human identity.")],
+    confirm: Annotated[
+        str, typer.Option("--confirm", help="Exact confirmed freeze SHA256.")
+    ],
+    experiments_dir: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "experiments"
+    ),
+) -> None:
+    """Record an explicit human approval for one request and freeze hash."""
+    try:
+        request_path = _phase6_artifact(experiments_dir, request, "test_request.json")
+        approval_path = approve_test_request(request_path, approver, confirm)
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    except (
+        duckdb.Error,
+        KeyError,
+        OSError,
+        PermissionError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as error:
+        _phase6_error("test-approve", error)
+    _render(
+        {
+            "approval": str(approval_path),
+            "approval_id": approval["approval_id"],
+            "freeze_id": approval["freeze_id"],
+            "operation": "test-approve",
+            "request_id": approval["request_id"],
+            "status": "approved",
+            "test_accessed": False,
+        }
+    )
+
+
+@app.command("final-test")
+def final_test(
+    approval: Annotated[str, typer.Option("--approval", help="Approval ID.")],
+    config_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("config"),
+    data_dir: Annotated[Path, typer.Option(file_okay=False)] = Path("data"),
+    experiments_dir: Annotated[Path, typer.Option(file_okay=False)] = Path(
+        "experiments"
+    ),
+) -> None:
+    """Run the locked test only from one explicit, cataloged approval."""
+    try:
+        approval_path = _phase6_artifact(experiments_dir, approval, "approval.json")
+        result_path = run_final_test(
+            approval_path, config_dir, data_dir, experiments_dir
+        )
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (
+        duckdb.Error,
+        KeyError,
+        OSError,
+        PermissionError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as error:
+        _phase6_error("final-test", error)
+    _render(
+        {
+            "operation": "final-test",
+            "result": str(result_path),
+            "status": result["status"],
+            "test_accessed": result["test_accessed"],
+            "test_run_id": result["test_run_id"],
+        }
+    )
 
 
 if __name__ == "__main__":

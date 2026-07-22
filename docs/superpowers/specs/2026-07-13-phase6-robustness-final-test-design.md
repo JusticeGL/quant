@@ -24,12 +24,84 @@ the existing secret-safe Tushare provider and immutable raw request cache.
   `log(total_market_cap_cny)` and retains the untransformed values for audit.
 - `index_classify` supplies the SW2021 industry dictionary.
 - `index_member_all` supplies historical constituent intervals for SW2021
-  industries. Industry membership requires
-  `effective_from <= D <= effective_to` and `known_at <= D`.
+industries. Industry membership requires
+`effective_from <= D <= effective_to` and `known_at <= D`.
+- The canonical `industry_membership.parquet` retains the complete approved
+  history for catalog and future approved-test use. Pre-test code can open only
+  `industry_membership_pretest.parquet`, a manifest-bound deterministic view
+  containing rows known and effective before 2026-01-01 with interval ends
+  clipped to 2025-12-31. Snapshot validation re-derives and byte-checks this
+  view from the canonical history.
 - The relay must return every required field. Extra fields may be discarded;
   missing fields, truncation, duplicate keys, interval overlaps, unknown
   securities, or inadequate coverage stop publication.
 - Current industry values are never used to backfill history.
+- A non-empty historical membership that cannot be mapped through the SW2021
+  L2 hierarchy may use a code-only bridge from the same Tushare
+  `index_classify` endpoint. The publisher acquires immutable SW2014 L1/L2/L3
+  artifacts, validates L3 index-code to L2 industry-code to L1 industry-code,
+  and accepts the result only when the SW2014 L1 index code uniquely exists in
+  the SW2021 L1 dictionary. If both membership L3 and L2 paths exist they must
+  agree. Names are never used; missing, ambiguous or conflicting links fail
+  closed. Each bridged interval records source/target taxonomy and mapping
+  provenance, and quality reports disclose the bridge count.
+
+On 2026-07-14 the user initially approved a minimum 98% industry-observation
+coverage policy for the historical pre-test input. A real-cache validation on
+2026-07-14 measured 445,199 matches out of 473,103 observations: 27,904 missing
+observations across 74 securities and 94.1019186097% coverage. On 2026-07-15
+the user explicitly approved lowering only this minimum to 94%, accepting the
+documented historical-industry diagnostic risk rather than backfilling current
+industry values into history or introducing a new provider. Coverage is measured over
+the Phase 5 expected `(trade_date, security_id)` observations by point-in-time
+interval matching, including `known_at`; it is not an entity-ever-mapped
+ratio. Missing securities and observations are deterministic warnings when the
+ratio remains at least 94%, while a ratio below 94% is an error and prevents
+publication. Empty L1 responses remain explicit information, and duplicate,
+overlap, unknown-reference, and market-cap gates are unchanged. Unmatched rows
+remain in factor and cost evaluation but are excluded from industry-neutral
+diagnostics.
+
+Task 2 also publishes canonical
+`manifests/<p6x-id>/pretest_capability.json`. Its content deliberately contains
+no p6x ID or p6x path, so its content-derived identity can be referenced by the
+p6x root without a hash cycle. The root identity binds the complete
+manifest-relative `{path, sha256, capability_id}` reference. The capability
+contains only the fixed `2026-01-01` cutoff, opaque Phase 5 parent ID/manifest
+SHA, policy SHA, pre-2026 Phase 5 market partitions, pre-2026 market-cap
+partitions, industry definitions, the isolated pre-test membership, and exact
+safe-subset quality metadata. It excludes full membership, full quality
+reports, raw-cache paths and 2026 counts.
+
+Publication and catalog administration re-derive this capability from the full
+roots. Freeze creation, freeze validation and pre-test readers use a pure
+capability validator instead: it may parse the p6x root and recompute its
+identity as opaque parent metadata, but cannot open either full quality report,
+the Phase 5 root, raw cache, a 2026 partition, or full membership. Both readers
+are located by the root p6x ID; there is no Phase 5-manifest fallback.
+
+The pure pre-test validator additionally requires the Task 3 administrative
+catalog at `data/metadata.duckdb` as an independent trust anchor. It opens the
+database read-only, requires the exact packaged migration ledger through schema
+version 3, and matches the exact
+valid p6x snapshot type, root identity, Phase 5 parent, passing administrative
+quality result, and the unique linked `meta.pretest_data_capability` artifact
+path/SHA. Missing or mismatched catalog state fails before any safe Parquet is
+opened. Only after this attestation does it hash the safe artifacts and compare
+their declared row counts with Parquet footer `num_rows`. The safe namespace is
+closed: each of daily-bar, adjustment-factor, daily-status and market-cap has
+exactly one partition for every year 2020-2025, plus the two fixed industry
+artifacts. No Phase 5 root/full quality, p6x full quality/raw/full membership,
+or 2026 partition is opened.
+
+Here, the schema requirement means an exact comparison of the ordered 1-3
+migration records, including migration names and SHA256 of the packaged SQL;
+extra records also fail. The anchor assumes the cooperative immutable publisher
+and operating permissions protect the DuckDB file. Manual DuckDB mutation,
+database replacement, or a malicious writer with the same filesystem authority
+is outside the threat model. Protecting against that actor requires an external
+signature authority or independently enforced read-only storage; the local
+catalog check must not be interpreted as providing that property.
 
 The immutable exposure snapshot ID is `p6x-<identity-prefix>`. Its identity
 includes the Phase 5 manifest hash, every raw exposure artifact hash, the
@@ -148,6 +220,24 @@ The final-test loader validates the freeze, candidate hashes, data snapshot
 hashes, policy hashes, request, approval, and explicit test range before opening
 test data. A changed input makes the approval invalid. Repeating the same test
 is idempotent; a different result for an existing test run ID is an error.
+
+Task 6 does not trust the published gate booleans alone. Request creation parses
+the complete walk-forward, fixed four-scenario cost, and exposure JSON reports,
+checks their common freeze/dependency identities and fixed five-fold diagnostic
+shape, recomputes the four gates with the locked robustness policy, and verifies
+the deterministic Markdown bytes. The request also pins an execution bundle of
+all effective evaluation/baseline/split/registry configuration and the imported
+factor, metric, backtest, walk-forward, exposure, and report source modules.
+Every bundle byte is rechecked before locked data access.
+
+The cooperative administrative anchor is the schema-v3 DuckDB catalog. Request
+creation transactionally registers the exact freeze and request; explicit human
+approval registers the exact approval. Final-test authorization opens that
+catalog read-only, verifies the exact migration ledger and exact freeze/request/
+approval tuples before any locked read, then records the immutable success or
+failure run. Manual DuckDB rewriting or replacement by a same-permission writer
+remains outside this threat model; resisting that actor requires external
+signatures or independently enforced read-only storage.
 
 ## Artifacts and immutability
 
